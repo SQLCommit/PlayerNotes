@@ -18,7 +18,8 @@ Remember every player you meet in FFXI. Track players with star ratings, color-c
 
 ## Requirements
 
-- Ashita v4.30+ (uses built-in LuaSQLite3 and ImGui 1.92.3)
+- Ashita v4.30+ (uses built-in LuaSQLite3)
+	- This release has only been tested with Ashita v4.30
 
 ## Installation
 
@@ -200,18 +201,6 @@ Two tables with foreign key cascading:
 - **players** - One row per player (name, rating, tags, timestamps)
 - **notes** - Multiple notes per player (text, zone, timestamp), CASCADE delete
 
-## Server Impact
-
-PlayerNotes is **entirely client-side** and sends **zero packets** to the server:
-
-- All data stored in local SQLite database
-- Entity scanning reads from client memory only (no server queries)
-- Party member detection uses client-side memory API
-- No GM commands, no injected packets, no server-side state changes
-- Safe for use on both private servers and retail
-
-The periodic check interval (default 10s, configurable 5-60s) controls how often the entity array is scanned. Higher intervals reduce client CPU usage. All checks are memory read loops with no network activity.
-
 ## Technical Notes
 
 ### Performance
@@ -239,10 +228,6 @@ The periodic check interval (default 10s, configurable 5-60s) controls how often
 - `PushStyleVar(ImGuiStyleVar_Alpha, 0.4)` for greying out dependent controls
 - Separate popup windows for Add Player, Settings, and Advanced Toast Settings
 - Stack direction via `imgui.Combo` dropdown (Stack down / Stack up)
-
-### Limitations
-- Entity scan (0-2047) is CPU-bound; configurable interval mitigates this
-- Notes `job` column exists in schema (vestigial, kept for existing DB compatibility) but is never populated
 
 ## Version History
 
