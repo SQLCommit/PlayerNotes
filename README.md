@@ -42,7 +42,7 @@ Remember every player you meet in FFXI. Track players with star ratings, color-c
 | `/pn help` | Show all commands |
 
 ## Alert System
-
+**These are placeholder sound files**
 PlayerNotes uses 6 distinct alert types with priority and suppression logic:
 
 | Type | Trigger | Default Color | Default Sound |
