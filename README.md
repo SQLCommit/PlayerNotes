@@ -1,4 +1,4 @@
-# PlayerNotes v1.0.0 - Player Tracking for Ashita v4
+# PlayerNotes v1.0.0 - Player Tracking for Ashita v4.3
 
 Remember every player you meet in FFXI. Track players with star ratings, color-coded tags, and detailed notes. Get toast alerts when tracked players appear nearby or join your party.
 
