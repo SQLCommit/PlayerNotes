@@ -1,5 +1,5 @@
 --[[
-    PlayerNotes v1.0.0 - Player Tracking Addon for Ashita v4
+    PlayerNotes v1.2.1 - Player Tracking Addon for Ashita v4
 
     Track players you meet in FFXI with ratings, tags, and notes.
     Get toast alerts when tracked players appear nearby or join
@@ -12,20 +12,21 @@
         /pn rate <name> <1-5>    - Set player rating
         /pn tag <name> <tag>     - Toggle tag on a player
         /pn search <term>        - Search players
-        /pn export               - Export all data to JSON
+        /pn export               - Export all data to JSON (shared folder)
         /pn import [file]        - Import from export file
+        /pn import list          - List available export files
         /pn resetui / reset      - Reset UI layout
         /pn help                 - Show commands
 
     Author: SQLCommit
-    Version: 1.0.0
+    Version: 1.2.1
 ]]--
 
-addon.name      = 'playernotes';
-addon.author    = 'SQLCommit';
-addon.version   = '1.0.0';
-addon.desc      = 'Player tracking with ratings, tags, and notes.';
-addon.link      = 'https://github.com/SQLCommit/playernotes';
+addon.name    = 'playernotes';
+addon.author  = 'SQLCommit';
+addon.version = '1.2.1';
+addon.desc    = 'Player tracking with ratings, tags, and notes.';
+addon.link    = 'https://github.com/SQLCommit/playernotes';
 
 require 'common';
 
@@ -77,12 +78,21 @@ local default_settings = T{
     toast_fade_enabled       = true,
     toast_fade_in            = 0.0,
     toast_fade_out           = 1.0,
+    toast_slide_enabled      = false,
+    toast_slide_in           = 0.3,
+    toast_slide_out          = 0.5,
+    toast_slide_dir          = 0,
+    toast_slide_bounce       = false,
+    toast_bounce_speed       = 0.35,
     toast_bg_opacity         = 0.8,
     toast_bg_color           = T{ 0.11, 0.11, 0.14 },
     toast_stack_down         = true,
     toast_stack_spacing      = 40,
     toast_max_visible        = 10,
     toast_click_dismiss      = false,
+    toast_rounding           = 0,
+    toast_border             = 0.0,
+    toast_border_color       = T{ 0.43, 0.43, 0.50 },
 };
 
 -------------------------------------------------------------------------------
@@ -93,16 +103,19 @@ local last_zone_id = 0;
 local last_party_names = T{};
 local known_party_names = T{};
 local last_was_alliance = false;
+local last_zone_time = 0;
 
 -------------------------------------------------------------------------------
 -- Valid tags (for command validation)
 -------------------------------------------------------------------------------
 local valid_tags = {
-    healer = 'Healer', tank = 'Tank', dps = 'DPS', support = 'Support',
+    healer = 'Healer', tank = 'Tank', dps = 'DPS', mage = 'Mage', support = 'Support',
     crafter = 'Crafter', friend = 'Friend', avoid = 'Avoid', mentor = 'Mentor',
 };
 
 local exports_dir = '';
+local base_path = '';
+local char_detected = false;
 
 -------------------------------------------------------------------------------
 -- Helper: Self-name check (prevent tracking yourself)
@@ -123,10 +136,11 @@ local function print_help()
         { '/pn show / hide',            'Show or hide the window.' },
         { '/pn <name> <note>',          'Quick note on a player.' },
         { '/pn rate <name> <1-5>',      'Set player rating.' },
-        { '/pn tag <name> <tag>',       'Toggle tag (Healer/Tank/DPS/Support/Crafter/Friend/Avoid/Mentor).' },
+        { '/pn tag <name> <tag>',       'Toggle tag (Healer/Tank/DPS/Mage/Support/Crafter/Friend/Avoid/Mentor).' },
         { '/pn search <term>',          'Search players by name or tag.' },
-        { '/pn export',                 'Export all players and notes to a JSON file.' },
+        { '/pn export',                 'Export all data to a JSON file (shared across characters).' },
         { '/pn import [file]',          'Import from the latest (or named) export file.' },
+        { '/pn import list',            'List all available export files.' },
         { '/pn resetui',                'Reset window size and position.' },
         { '/pn help',                   'Show this help message.' },
     };
@@ -145,15 +159,16 @@ end
 ashita.events.register('load', 'playernotes_load', function ()
     local s = settings.load(default_settings);
 
-    -- Initialize database
-    local config_path = AshitaCore:GetInstallPath() .. '\\config\\addons\\playernotes';
-    ashita.fs.create_directory(config_path);
-    db.init(config_path);
+    -- Store base path for deferred per-character DB init
+    base_path = AshitaCore:GetInstallPath() .. '\\config\\addons\\playernotes';
+    ashita.fs.create_directory(base_path);
 
-    exports_dir = config_path .. '\\exports';
+    -- Exports stay in shared folder (not per-character)
+    exports_dir = base_path .. '\\exports';
     ashita.fs.create_directory(exports_dir);
 
-    -- Initialize UI
+    -- DB init is deferred until character name is detected (check_character in d3d_present)
+    -- UI can safely render before DB is ready (all db functions handle conn == nil)
     ui.init(db, context, s, default_settings);
     ui.is_open[1] = s.show_on_load;
 
@@ -231,7 +246,9 @@ ashita.events.register('command', 'playernotes_command', function (e)
             return;
         end
 
-        local filename = 'playernotes_' .. os.date('%Y%m%d_%H%M%S') .. '.json';
+        local char_name = context.get_player_name();
+        if (char_name == '') then char_name = 'unknown'; end
+        local filename = 'playernotes_' .. char_name .. '_' .. os.date('%Y%m%d_%H%M%S') .. '.json';
         local filepath = exports_dir .. '\\' .. filename;
         local f, err = io.open(filepath, 'w');
         if (f == nil) then
@@ -247,17 +264,37 @@ ashita.events.register('command', 'playernotes_command', function (e)
         return;
     end
 
+    -- /pn import list
+    if (args[2]:any('import') and #args >= 3 and args[3]:any('list')) then
+        local files = ashita.fs.get_dir(exports_dir, '.*%.json', false);
+        if (files == nil or #files == 0) then
+            print(chat.header(addon.name):append(chat.error('No export files found in exports/ directory.')));
+            return;
+        end
+        table.sort(files);
+        print(chat.header(addon.name):append(chat.message(#files .. ' export file(s) in exports/:')));
+        for i, fname in ipairs(files) do
+            local prefix = (i == #files) and ' >> ' or '    ';
+            print(chat.header(addon.name):append(chat.message(prefix .. fname)));
+        end
+        print(chat.header(addon.name):append(chat.message('Use /pn import <filename> or /pn import (latest).')));
+        return;
+    end
+
     -- /pn import [filename]
     if (args[2]:any('import')) then
         local filepath = nil;
+        local chosen_name = nil;
 
         if (#args >= 3) then
             -- Specific filename provided
             local fname = args[3];
             if (fname:find('\\') or fname:find('/')) then
                 filepath = fname; -- Absolute or relative path
+                chosen_name = fname;
             else
                 filepath = exports_dir .. '\\' .. fname;
+                chosen_name = fname;
             end
         else
             -- Find latest export file
@@ -267,7 +304,12 @@ ashita.events.register('command', 'playernotes_command', function (e)
                 return;
             end
             table.sort(files);
-            filepath = exports_dir .. '\\' .. files[#files];
+            chosen_name = files[#files];
+            filepath = exports_dir .. '\\' .. chosen_name;
+            if (#files > 1) then
+                print(chat.header(addon.name):append(chat.message('Found ' .. #files .. ' exports, using latest: ' .. chosen_name)));
+                print(chat.header(addon.name):append(chat.message('Use /pn import list to see all, or /pn import <filename>.')));
+            end
         end
 
         local f, err = io.open(filepath, 'r');
@@ -290,7 +332,7 @@ ashita.events.register('command', 'playernotes_command', function (e)
         end
 
         local result = db.import_data(data.players);
-        print(chat.header(addon.name):append(chat.success('Import complete: '))
+        print(chat.header(addon.name):append(chat.success('Imported ' .. chosen_name .. ': '))
             :append(chat.message(result.players_added .. ' added, ' .. result.players_updated .. ' updated, '
                 .. result.notes_added .. ' notes added, ' .. result.notes_skipped .. ' skipped')));
         return;
@@ -343,7 +385,7 @@ ashita.events.register('command', 'playernotes_command', function (e)
         local tag_input = args[4]:lower();
         local tag_name = valid_tags[tag_input];
         if (tag_name == nil) then
-            print(chat.header(addon.name):append(chat.error('Unknown tag. Valid: Healer, Tank, DPS, Support, Crafter, Friend, Avoid, Mentor')));
+            print(chat.header(addon.name):append(chat.error('Unknown tag. Valid: Healer, Tank, DPS, Mage, Support, Crafter, Friend, Avoid, Mentor')));
             return;
         end
 
@@ -357,8 +399,15 @@ ashita.events.register('command', 'playernotes_command', function (e)
             -- Toggle tag
             local tags = player.tags or '';
             if (tags:find(tag_name)) then
-                tags = tags:gsub(',?' .. tag_name .. ',?', '');
-                tags = tags:gsub('^,', ''):gsub(',$', '');
+                -- Parse to table, remove, reconstruct (avoids regex merging adjacent tags)
+                local tag_list = {};
+                for t in tags:gmatch('[^,]+') do
+                    local trimmed = t:match('^%s*(.-)%s*$');
+                    if (trimmed ~= tag_name) then
+                        tag_list[#tag_list + 1] = trimmed;
+                    end
+                end
+                tags = table.concat(tag_list, ',');
                 print(chat.header(addon.name):append(chat.message('Tag removed: '))
                     :append(chat.message(pname .. ' [-' .. tag_name .. ']')));
             else
@@ -404,6 +453,16 @@ ashita.events.register('command', 'playernotes_command', function (e)
 end);
 
 ashita.events.register('d3d_present', 'playernotes_present', function ()
+    -- Deferred DB init: detect character name once logged in
+    if (not char_detected) then
+        local name, server_id = context.get_player_info();
+        if (name ~= '' and server_id > 0) then
+            char_detected = true;
+            local char_folder = name .. '_' .. tostring(server_id);
+            db.init(base_path, char_folder);
+        end
+    end
+
     -- Save settings if UI flagged a change
     if (ui.settings_dirty) then
         ui.settings_dirty = false;
@@ -423,6 +482,7 @@ ashita.events.register('d3d_present', 'playernotes_present', function ()
             ui.reset_alerts();
         end
         last_zone_id = zone_id;
+        last_zone_time = os.clock();
     end
 
     -- Periodic checks
@@ -451,14 +511,17 @@ ashita.events.register('d3d_present', 'playernotes_present', function ()
         local current_is_alliance = context.is_alliance();
 
         if (#last_party_names > 0 and #current_names == 0) then
-            if (ui.settings.prompt_on_disband and not last_was_alliance) then
+            if (ui.settings.prompt_on_disband and not last_was_alliance and (now - last_zone_time) > 15) then
                 ui.show_disband_popup(known_party_names);
+                known_party_names = T{};
+                last_party_names = current_names;
+                last_was_alliance = current_is_alliance;
             end
-            known_party_names = T{};
+            -- During cooldown: preserve state so detection retries on next check
+        else
+            last_party_names = current_names;
+            last_was_alliance = current_is_alliance;
         end
-
-        last_party_names = current_names;
-        last_was_alliance = current_is_alliance;
     end
 
     ui.render();

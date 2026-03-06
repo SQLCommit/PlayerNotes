@@ -1,10 +1,10 @@
 --[[
-    PlayerNotes v1.0.0 - ImGui UI Rendering
+    PlayerNotes v1.2.1 - ImGui UI Rendering
     Single-view layout: toolbar (search + tag filter + add) + sortable table + detail panel.
     Player detail panel with star ratings, tag toggles, and notes.
 
     Author: SQLCommit
-    Version: 1.0.0
+    Version: 1.2.1
 ]]--
 
 require 'common';
@@ -33,12 +33,13 @@ ui.show_add_player = { false, };
 ui.tag_defs = T{
     { id = 'Healer',  color = { 0.4, 1.0, 0.4, 1.0 }, tip = 'WHM, SCH, etc.' },
     { id = 'Tank',    color = { 0.4, 0.7, 1.0, 1.0 }, tip = 'PLD, RUN, etc.' },
-    { id = 'DPS',     color = { 1.0, 0.4, 0.4, 1.0 }, tip = 'Damage dealers' },
-    { id = 'Support', color = { 0.7, 0.4, 1.0, 1.0 }, tip = 'BRD, COR, GEO' },
-    { id = 'Crafter', color = { 1.0, 0.7, 0.3, 1.0 }, tip = 'Crafting partners' },
-    { id = 'Friend',  color = { 0.4, 1.0, 1.0, 1.0 }, tip = 'Triggers party + nearby alerts' },
-    { id = 'Avoid',   color = { 0.8, 0.2, 0.2, 1.0 }, tip = 'Warning alerts + red row highlight' },
-    { id = 'Mentor',  color = { 1.0, 0.85, 0.0, 1.0 }, tip = 'Helpful teachers' },
+    { id = 'DPS',     color = { 1.0, 0.4, 0.4, 1.0 }, tip = 'WAR, SAM, etc.' },
+    { id = 'Mage',    color = { 0.6, 0.4, 1.0, 1.0 }, tip = 'BLM, SMN, etc.' },
+    { id = 'Support', color = { 0.7, 0.6, 1.0, 1.0 }, tip = 'BRD, COR, etc.' },
+    { id = 'Crafter', color = { 1.0, 0.7, 0.3, 1.0 }, tip = 'Crafting partners.' },
+    { id = 'Friend',  color = { 0.4, 1.0, 1.0, 1.0 }, tip = 'Triggers party and nearby alerts.' },
+    { id = 'Avoid',   color = { 0.8, 0.2, 0.2, 1.0 }, tip = 'Warning alerts and red row highlight.' },
+    { id = 'Mentor',  color = { 1.0, 0.85, 0.0, 1.0 }, tip = 'Helpful teachers.' },
 };
 
 -- Tag color lookup
@@ -108,6 +109,13 @@ ui.setting_bg_opacity     = { 0.8, };
 ui.setting_bg_color       = { 0.11, 0.11, 0.14, };
 ui.setting_stack_spacing  = { 40, };
 ui.setting_max_visible    = { 10, };
+ui.setting_toast_rounding = { 0, };
+ui.setting_toast_border   = { 0.0, };
+ui.setting_toast_border_color = { 0.43, 0.43, 0.50, };
+ui.setting_slide_in   = { 0.3, };
+ui.setting_slide_out  = { 0.5, };
+ui.setting_slide_dir  = { 0, };  -- 0=Left, 1=Right, 2=Top, 3=Bottom
+ui.setting_bounce_speed = { 0.35, };
 ui.setting_color_player_alert  = { 0.4, 1.0, 1.0, };
 ui.setting_color_friend_alert  = { 0.4, 1.0, 0.4, };
 ui.setting_color_friend_nearby = { 0.3, 0.8, 0.3, };
@@ -128,6 +136,25 @@ ui.disband_members = T{};
 -- Table salt for reset
 ui.table_salt = 0;
 
+-- Toast test cycle state
+local toast_test_index = 0;
+local toast_test_types = {
+    { toast = 'player_alert',  fmt = '%s joined party' },
+    { toast = 'friend_alert',  fmt = '%s joined party (Friend)' },
+    { toast = 'friend_nearby', fmt = '%s is nearby (Friend)' },
+    { toast = 'avoid_alert',   fmt = 'WARNING: %s joined party — Avoid' },
+    { toast = 'avoid_nearby',  fmt = 'WARNING: %s nearby — Avoid' },
+    { toast = 'disband',       fmt = 'Party disbanded — add notes?' },
+};
+
+-- Player table resize
+local table_user_h = nil;  -- nil = auto-size, number = user-dragged height
+local table_dragging = false;
+local table_drag_start_y = 0;
+local table_drag_start_h = 0;
+local resize_bar_u32 = nil;
+local resize_bar_hover_u32 = nil;
+
 -- Colors
 local colors = {
     header    = { 1.0, 0.65, 0.26, 1.0 },
@@ -137,10 +164,33 @@ local colors = {
     star_on   = { 1.0, 0.85, 0.0, 1.0 },
     star_off  = { 0.4, 0.4, 0.4, 1.0 },
     player    = { 0.4, 1.0, 1.0, 1.0 },
+    card_bg     = { 0.16, 0.16, 0.20, 1.0 },
+    card_pinned = { 0.18, 0.17, 0.14, 1.0 },
+    accent_gold = { 1.0, 0.75, 0.0, 1.0 },
+    accent_gray = { 0.4, 0.4, 0.4, 1.0 },
 };
 
 -- Cached ImU32 colors (computed once, not per-frame)
 local avoid_row_color = nil; -- deferred until first render (imgui must be loaded)
+local card_bg_u32 = nil;
+local card_pinned_u32 = nil;
+local accent_gold_u32 = nil;
+local accent_gray_u32 = nil;
+local shadow_u32 = nil;
+local panel_bg_u32 = nil;
+local panel_border_u32 = nil;
+local divider_orange_u32 = nil;
+
+-- Note card height cache (two-pass rendering: first pass measures, second draws)
+local note_heights = {};
+local last_detail_player_id = nil;
+
+-- Section panel heights (two-pass: measure this frame, draw next frame)
+local detail_panel_h = nil;
+local notes_panel_h = nil;
+
+-- Pre-computed star display strings (avoids per-row string concat at 60fps)
+local star_strings = { [0] = '-', '*', '**', '***', '****', '*****' };
 
 -------------------------------------------------------------------------------
 -- Cached References
@@ -148,6 +198,9 @@ local avoid_row_color = nil; -- deferred until first render (imgui must be loade
 local string_format = string.format;
 local os_date = os.date;
 local os_clock = os.clock;
+local math_min = math.min;
+local math_max = math.max;
+local tostring = tostring;
 
 -------------------------------------------------------------------------------
 -- Initialization
@@ -165,6 +218,13 @@ local function sync_advanced_buffers(s)
     ui.setting_bg_opacity[1]    = s.toast_bg_opacity or 0.8;
     ui.setting_stack_spacing[1] = s.toast_stack_spacing or 40;
     ui.setting_max_visible[1]   = s.toast_max_visible or 10;
+    ui.setting_toast_rounding[1] = s.toast_rounding or 0;
+    ui.setting_toast_border[1]   = s.toast_border or 0.0;
+    sync_color_buf(ui.setting_toast_border_color, s.toast_border_color or {}, 0.43, 0.43, 0.50);
+    ui.setting_slide_in[1]  = s.toast_slide_in or 0.3;
+    ui.setting_slide_out[1] = s.toast_slide_out or 0.5;
+    ui.setting_slide_dir[1] = s.toast_slide_dir or 0;
+    ui.setting_bounce_speed[1] = s.toast_bounce_speed or 0.35;
 
     sync_color_buf(ui.setting_bg_color, s.toast_bg_color or {}, 0.11, 0.11, 0.14);
     sync_color_buf(ui.setting_color_player_alert, s.toast_color_player_alert or {}, 0.4, 1.0, 1.0);
@@ -208,6 +268,13 @@ function ui.sync_settings()
     ui.settings.toast_bg_opacity    = ui.setting_bg_opacity[1];
     ui.settings.toast_stack_spacing = ui.setting_stack_spacing[1];
     ui.settings.toast_max_visible   = ui.setting_max_visible[1];
+    ui.settings.toast_rounding      = ui.setting_toast_rounding[1];
+    ui.settings.toast_border        = ui.setting_toast_border[1];
+    ui.settings.toast_border_color  = T{ ui.setting_toast_border_color[1], ui.setting_toast_border_color[2], ui.setting_toast_border_color[3] };
+    ui.settings.toast_slide_in  = ui.setting_slide_in[1];
+    ui.settings.toast_slide_out = ui.setting_slide_out[1];
+    ui.settings.toast_slide_dir = ui.setting_slide_dir[1];
+    ui.settings.toast_bounce_speed = ui.setting_bounce_speed[1];
 
     ui.settings.toast_bg_color = T{
         ui.setting_bg_color[1], ui.setting_bg_color[2], ui.setting_bg_color[3],
@@ -269,7 +336,7 @@ end
 
 local function trim_buf(s)
     if (type(s) == 'string') then
-        return s:trim('\0');
+        return s:gsub('%z+$', ''):gsub('[%s]+$', '');
     end
     return '';
 end
@@ -337,10 +404,12 @@ local function render_tag_toggles(label, tag_set)
             tag_set[td.id] = not is_on;
             changed = true;
         end
-        if (imgui.IsItemHovered() and td.tip) then
-            imgui.SetTooltip(td.id .. ': ' .. td.tip);
-        end
         imgui.PopStyleColor(2);
+        if (imgui.IsItemHovered() and td.tip) then
+            imgui.PushStyleColor(ImGuiCol_Text, td.color);
+            imgui.SetTooltip(td.id .. ': ' .. td.tip);
+            imgui.PopStyleColor();
+        end
     end
     return changed;
 end
@@ -438,14 +507,12 @@ function ui.show_toast(text, toast_type, color)
     });
 
     -- Sound: nil type = silent (visual only), master toggle gates all sounds
+    -- Per-type sound controlled by file presence (clear filename to mute)
     if (toast_type ~= nil and s ~= nil and s.toast_sound_enabled ~= false) then
-        local toggle_key = toast_sound_toggle_keys[toast_type];
         local file_key = toast_sound_file_keys[toast_type];
-        if (toggle_key ~= nil and s[toggle_key]) then
-            local sound_file = (file_key ~= nil and s[file_key]) or 'player_alert.wav';
-            if (sound_file ~= '') then
-                pcall(ashita.misc.play_sound, addon.path:append('\\sounds\\'):append(sound_file));
-            end
+        local sound_file = (file_key ~= nil and s[file_key]) or '';
+        if (sound_file ~= '') then
+            pcall(ashita.misc.play_sound, addon.path:append('\\sounds\\'):append(sound_file));
         end
     end
 end
@@ -468,6 +535,12 @@ local function render_toasts()
     local stack_spacing = (s ~= nil and s.toast_stack_spacing) or 40;
     local max_visible   = (s ~= nil and s.toast_max_visible) or 10;
     local click_dismiss = (s ~= nil and s.toast_click_dismiss);
+    local slide_enabled = (s ~= nil and s.toast_slide_enabled);
+    local slide_in      = (s ~= nil and s.toast_slide_in) or 0.3;
+    local slide_out     = (s ~= nil and s.toast_slide_out) or 0.5;
+    local slide_dir     = (s ~= nil and s.toast_slide_dir) or 0;
+    local slide_bounce  = (s ~= nil and s.toast_slide_bounce);
+    local bounce_speed  = (s ~= nil and s.toast_bounce_speed) or 0.35;
 
     local visible = 0;
     for i, toast in ipairs(ui.toasts) do
@@ -484,15 +557,55 @@ local function render_toasts()
                     alpha = elapsed / fade_in;
                 end
                 if (fade_out > 0 and elapsed > duration - fade_out) then
-                    alpha = math.min(alpha, (duration - elapsed) / fade_out);
+                    alpha = math_min(alpha, (duration - elapsed) / fade_out);
                 end
             end
-            alpha = math.max(0.0, math.min(1.0, alpha));
+            alpha = math_max(0.0, math_min(1.0, alpha));
 
             -- Position: stack direction
             local y_offset = (visible - 1) * stack_spacing;
             if (not stack_down) then y_offset = -y_offset; end
-            imgui.SetNextWindowPos({ base_x, base_y + y_offset }, ImGuiCond_Always);
+
+            -- Slide animation (independent timing)
+            local x = base_x;
+            local y_slide = 0;
+            if (slide_enabled) then
+                local sliding_in  = (slide_in > 0 and elapsed < slide_in);
+                local sliding_out = (slide_out > 0 and elapsed > duration - slide_out);
+                local slide_t = 1.0;
+                if (sliding_in) then
+                    slide_t = elapsed / slide_in;
+                end
+                if (sliding_out) then
+                    slide_t = math_min(slide_t, (duration - elapsed) / slide_out);
+                end
+                slide_t = math_max(0.0, math_min(1.0, slide_t));
+                -- Easing: bounce (elastic) on entry only, cubic on exit
+                local eased;
+                if (slide_bounce and sliding_in and not sliding_out) then
+                    if (slide_t == 0 or slide_t == 1) then
+                        eased = slide_t;
+                    else
+                        local p = bounce_speed;
+                        eased = 2.0 ^ (-10.0 * slide_t) * math.sin((slide_t - p / 4.0) * 6.2831853 / p) + 1.0;
+                    end
+                else
+                    -- Ease-out cubic for smooth deceleration
+                    eased = 1.0 - (1.0 - slide_t) * (1.0 - slide_t) * (1.0 - slide_t);
+                end
+                local slide_dist = 300;
+                local offset = slide_dist * (1.0 - eased);
+                if (slide_dir == 0) then     -- From left
+                    x = base_x - offset;
+                elseif (slide_dir == 1) then -- From right
+                    x = base_x + offset;
+                elseif (slide_dir == 2) then -- From top
+                    y_slide = -offset;
+                else                         -- From bottom
+                    y_slide = offset;
+                end
+            end
+            imgui.SetNextWindowPos({ x, base_y + y_offset + y_slide }, ImGuiCond_Always);
 
             -- Background color/opacity
             if (bg_color ~= nil) then
@@ -501,6 +614,15 @@ local function render_toasts()
                 });
             else
                 imgui.SetNextWindowBgAlpha(bg_opacity * alpha);
+            end
+
+            local rounding = (s ~= nil and s.toast_rounding) or 0;
+            local border   = (s ~= nil and s.toast_border) or 0.0;
+            local bcol     = (s ~= nil and s.toast_border_color) or nil;
+            imgui.PushStyleVar(ImGuiStyleVar_WindowRounding, rounding);
+            imgui.PushStyleVar(ImGuiStyleVar_WindowBorderSize, border);
+            if (bcol ~= nil) then
+                imgui.PushStyleColor(ImGuiCol_Border, { bcol[1], bcol[2], bcol[3], alpha });
             end
 
             local flags = ImGuiWindowFlags_NoDecoration
@@ -522,6 +644,10 @@ local function render_toasts()
             end
             imgui.End();
 
+            imgui.PopStyleVar(2);
+            if (bcol ~= nil) then
+                imgui.PopStyleColor();
+            end
             if (bg_color ~= nil) then
                 imgui.PopStyleColor();
             end
@@ -546,6 +672,8 @@ end
 
 function ui.show_disband_popup(names)
     ui.disband_open = true;
+    disband_size_set = false;
+    disband_cached_h = 0;
     ui.disband_members = T{};
     for _, name in ipairs(names) do
         ui.disband_members:append({
@@ -557,43 +685,106 @@ function ui.show_disband_popup(names)
             saved = false,
         });
     end
-    ui.show_toast('Party disbanded — add notes?', 'disband');
+    if (ui.settings == nil or ui.settings.toast_sound_disband ~= false) then
+        ui.show_toast('Party disbanded — add notes?', 'disband');
+    end
 end
+
+-- Disband member card height cache (two-pass)
+local disband_card_heights = {};
+local disband_size_set = false;
+local disband_cached_h = 0;
 
 local function render_disband_popup()
     if (not ui.disband_open) then return; end
 
-    imgui.SetNextWindowSize({ 480, 0, }, ImGuiCond_Appearing);
+    local num = #ui.disband_members;
+
+    -- Use measured card heights when available, generous estimate otherwise
+    local h;
+    if (disband_cached_h > 0) then
+        h = disband_cached_h;
+    else
+        h = 120 + num * 110;
+    end
+
+    if (not disband_size_set) then
+        imgui.SetNextWindowSize({ 450, h }, ImGuiCond_Always);
+        disband_size_set = true;
+    end
+    imgui.SetNextWindowSizeConstraints({ 300, h }, { 9999, h });
 
     local open = { true, };
-    local flags = ImGuiWindowFlags_AlwaysAutoResize + ImGuiWindowFlags_NoSavedSettings;
+    local flags = ImGuiWindowFlags_NoSavedSettings;
 
     if (imgui.Begin('Party Disbanded##pn', open, flags)) then
+        local win_y = select(2, imgui.GetWindowPos());
+
+        -- Ensure U32 colors are initialized
+        if (shadow_u32 == nil) then
+            shadow_u32       = imgui.ColorConvertFloat4ToU32({ 0.0, 0.0, 0.0, 0.15 });
+            panel_bg_u32     = imgui.ColorConvertFloat4ToU32({ 0.22, 0.22, 0.26, 1.0 });
+            panel_border_u32 = imgui.ColorConvertFloat4ToU32({ 0.35, 0.35, 0.40, 1.0 });
+        end
+
         imgui.TextColored(colors.header, 'Your party has disbanded!');
         imgui.TextColored(colors.muted, 'Add notes about your party members?');
         imgui.Spacing();
-        imgui.Separator();
         imgui.Spacing();
+
+        local ddl = imgui.GetWindowDrawList();
+        local dpad = 8;
+        local dpanel_w = imgui.GetContentRegionAvail();
 
         local all_done = true;
         for i, member in ipairs(ui.disband_members) do
+            imgui.PushID('disband_' .. i);
+
+            local cx, cy = imgui.GetCursorScreenPos();
+            local cached_h = disband_card_heights[i];
+
+            -- Draw bubble using cached height
+            if (cached_h ~= nil and cached_h > 0) then
+                if (member.saved) then
+                    local saved_bg = imgui.ColorConvertFloat4ToU32({ 0.15, 0.22, 0.15, 1.0 });
+                    local saved_border = imgui.ColorConvertFloat4ToU32({ 0.3, 0.5, 0.3, 1.0 });
+                    ddl:AddRectFilled({ cx + 3, cy + 3 }, { cx + dpanel_w + 3, cy + cached_h + 3 }, shadow_u32, 8.0);
+                    ddl:AddRectFilled({ cx, cy }, { cx + dpanel_w, cy + cached_h }, saved_bg, 8.0);
+                    ddl:AddRect({ cx, cy }, { cx + dpanel_w, cy + cached_h }, saved_border, 8.0);
+                else
+                    ddl:AddRectFilled({ cx + 3, cy + 3 }, { cx + dpanel_w + 3, cy + cached_h + 3 }, shadow_u32, 8.0);
+                    ddl:AddRectFilled({ cx, cy }, { cx + dpanel_w, cy + cached_h }, panel_bg_u32, 8.0);
+                    ddl:AddRect({ cx, cy }, { cx + dpanel_w, cy + cached_h }, panel_border_u32, 8.0);
+                end
+            end
+
+            imgui.Dummy({ 0, dpad });
+
             if (not member.saved) then
                 all_done = false;
+
+                imgui.SetCursorPosX(imgui.GetCursorPosX() + dpad);
                 imgui.TextColored(colors.player, member.name);
-                local existing = ui.db.get_player_by_name(member.name);
+                -- Cache DB lookup per member (avoid querying every frame)
+                if (member.existing == nil) then
+                    member.existing = ui.db.get_player_by_name(member.name) or false;
+                end
+                local existing = (member.existing ~= false) and member.existing or nil;
                 if (existing ~= nil) then
                     imgui.SameLine();
                     imgui.TextColored(colors.muted, '(has profile)');
                 end
 
                 -- Rating
-                imgui.Text('  Rating: ');
+                imgui.SetCursorPosX(imgui.GetCursorPosX() + dpad);
+                imgui.Text('Rating: ');
                 imgui.SameLine();
                 local new_r = render_stars('disband_' .. i, member.rating);
                 if (new_r ~= nil) then member.rating = new_r; end
 
                 -- Note
-                imgui.PushItemWidth(340);
+                imgui.SetCursorPosX(imgui.GetCursorPosX() + dpad);
+                imgui.PushItemWidth(dpanel_w - dpad * 2 - 60);
                 imgui.InputText('##disband_note_' .. i, member.note_buf, member.note_size);
                 imgui.PopItemWidth();
                 imgui.SameLine();
@@ -606,7 +797,6 @@ local function render_disband_popup()
                     if (existing ~= nil) then
                         player_id = existing.id;
                         if (member.rating > 0) then
-                            -- Preserve existing tags (disband popup has no tag UI)
                             ui.db.update_player(player_id, member.rating, existing.tags or '');
                         end
                     else
@@ -619,27 +809,53 @@ local function render_disband_popup()
                     end
 
                     member.saved = true;
+                    disband_card_heights = {};
+                end
+                if (imgui.IsItemHovered()) then
+                    imgui.SetTooltip('Save rating and note for this player.');
                 end
             else
+                imgui.SetCursorPosX(imgui.GetCursorPosX() + dpad);
                 imgui.TextColored(colors.success, member.name .. ' — Saved!');
             end
+
+            imgui.Dummy({ 0, dpad });
+            -- Measure card height for next frame
+            local end_y = select(2, imgui.GetCursorScreenPos());
+            disband_card_heights[i] = end_y - cy;
+
+            imgui.PopID();
+            imgui.Spacing();
             imgui.Spacing();
         end
 
-        imgui.Separator();
+        imgui.Spacing();
         if (all_done) then
             if (imgui.Button('Done')) then
                 ui.disband_open = false;
+                disband_card_heights = {};
+            end
+            if (imgui.IsItemHovered()) then
+                imgui.SetTooltip('Close this popup. All members have been saved.');
             end
         else
             if (imgui.Button('Skip')) then
                 ui.disband_open = false;
+                disband_card_heights = {};
+            end
+            if (imgui.IsItemHovered()) then
+                imgui.SetTooltip('Close without saving remaining members.');
             end
         end
+
+        -- Measure actual content height for next frame's constraints
+        local end_y = select(2, imgui.GetCursorScreenPos());
+        disband_cached_h = end_y - win_y + 8;
     end
 
     if (not open[1]) then
         ui.disband_open = false;
+        disband_card_heights = {};
     end
     imgui.End();
 end
@@ -657,48 +873,112 @@ local function render_player_detail()
         return;
     end
 
-    imgui.Separator();
     imgui.Spacing();
+    imgui.Spacing();
+    imgui.Spacing();
+
+    -- Lazy-init U32 colors for panels
+    local dl = imgui.GetWindowDrawList();
+    if (shadow_u32 == nil) then
+        card_bg_u32      = imgui.ColorConvertFloat4ToU32({ colors.card_bg[1], colors.card_bg[2], colors.card_bg[3], colors.card_bg[4] });
+        card_pinned_u32  = imgui.ColorConvertFloat4ToU32({ colors.card_pinned[1], colors.card_pinned[2], colors.card_pinned[3], colors.card_pinned[4] });
+        accent_gold_u32  = imgui.ColorConvertFloat4ToU32({ colors.accent_gold[1], colors.accent_gold[2], colors.accent_gold[3], colors.accent_gold[4] });
+        accent_gray_u32  = imgui.ColorConvertFloat4ToU32({ colors.accent_gray[1], colors.accent_gray[2], colors.accent_gray[3], colors.accent_gray[4] });
+        shadow_u32       = imgui.ColorConvertFloat4ToU32({ 0.0, 0.0, 0.0, 0.15 });
+        panel_bg_u32     = imgui.ColorConvertFloat4ToU32({ 0.22, 0.22, 0.26, 1.0 });
+        panel_border_u32 = imgui.ColorConvertFloat4ToU32({ 0.35, 0.35, 0.40, 1.0 });
+        divider_orange_u32 = imgui.ColorConvertFloat4ToU32({ colors.header[1], colors.header[2], colors.header[3], 1.0 });
+    end
+
+    local pad = 8;
+    local panel_w = imgui.GetContentRegionAvail();
+
+    -- === Player Detail Bubble ===
+    local det_x, det_y = imgui.GetCursorScreenPos();
+    if (detail_panel_h ~= nil and detail_panel_h > 0) then
+        -- Soft shadow
+        dl:AddRectFilled({ det_x + 3, det_y + 3 }, { det_x + panel_w + 3, det_y + detail_panel_h + 3 }, shadow_u32, 8.0);
+        -- Bubble background
+        dl:AddRectFilled({ det_x, det_y }, { det_x + panel_w, det_y + detail_panel_h }, panel_bg_u32, 8.0);
+        -- Bubble border
+        dl:AddRect({ det_x, det_y }, { det_x + panel_w, det_y + detail_panel_h }, panel_border_u32, 8.0);
+    end
+    imgui.Dummy({ 0, pad });
+    imgui.SetCursorPosX(imgui.GetCursorPosX() + pad);
 
     -- Player name header
     imgui.TextColored(colors.player, player.player_name);
     imgui.SameLine();
     imgui.TextColored(colors.muted, string_format('(since %s)', fmt_time(player.created_at)));
 
+    -- Parse tags once for both rating and tag sections
+    local tag_set = parse_tags(player.tags);
+
     -- Rating (editable stars)
+    imgui.SetCursorPosX(imgui.GetCursorPosX() + pad);
     imgui.Text('Rating: ');
     imgui.SameLine();
     local new_rating = render_stars('detail', player.rating);
     if (new_rating ~= nil) then
-        local tag_set = parse_tags(player.tags);
         ui.db.update_player(player.id, new_rating, tags_to_string(tag_set));
     end
 
     -- Tags (editable toggles)
+    imgui.SetCursorPosX(imgui.GetCursorPosX() + pad);
     imgui.Text('Tags:   ');
     imgui.SameLine();
-    local tag_set = parse_tags(player.tags);
     if (render_tag_toggles('detail', tag_set)) then
         ui.db.update_player(player.id, player.rating, tags_to_string(tag_set));
     end
 
+    imgui.Dummy({ 0, pad });
+    -- Measure detail panel height for next frame
+    local det_end_y = select(2, imgui.GetCursorScreenPos());
+    detail_panel_h = det_end_y - det_y;
+
+    imgui.Spacing();
+    imgui.Spacing();
+    imgui.Spacing();
     imgui.Spacing();
 
-    -- Notes section
-    imgui.TextColored(colors.header, 'Notes');
-    imgui.Separator();
+    -- === Notes Bubble ===
+    local notes = ui.db.get_notes(player.id);
+    local nt_x, nt_y = imgui.GetCursorScreenPos();
+    if (notes_panel_h ~= nil and notes_panel_h > 0) then
+        dl:AddRectFilled({ nt_x + 3, nt_y + 3 }, { nt_x + panel_w + 3, nt_y + notes_panel_h + 3 }, shadow_u32, 8.0);
+        dl:AddRectFilled({ nt_x, nt_y }, { nt_x + panel_w, nt_y + notes_panel_h }, panel_bg_u32, 8.0);
+        dl:AddRect({ nt_x, nt_y }, { nt_x + panel_w, nt_y + notes_panel_h }, panel_border_u32, 8.0);
+    end
+    imgui.Dummy({ 0, pad });
+    imgui.SetCursorPosX(imgui.GetCursorPosX() + pad);
+    imgui.TextColored(colors.header, string_format('Notes (%d)', #notes));
 
-    -- Add new note (above list so newest-on-top feels natural)
-    imgui.PushItemWidth(-70);
-    imgui.InputTextWithHint('##add_note', 'Write a note...', ui.add_note_buf, ui.add_note_size);
-    imgui.PopItemWidth();
-    imgui.SameLine();
+    -- Clear height caches when player changes
+    if (last_detail_player_id ~= player.id) then
+        note_heights = {};
+        detail_panel_h = nil;
+        notes_panel_h = nil;
+        last_detail_player_id = player.id;
+    end
+
+    -- Add new note (multiline input with manual placeholder text)
+    imgui.SetCursorPosX(imgui.GetCursorPosX() + pad);
+    local note_input_x, note_input_y = imgui.GetCursorScreenPos();
+    imgui.InputTextMultiline('##add_note', ui.add_note_buf, ui.add_note_size, { -(pad + 1), 50 });
+    local buf_empty = (ui.add_note_buf[1] == nil or ui.add_note_buf[1] == '' or ui.add_note_buf[1]:byte(1) == 0);
+    if (buf_empty and not imgui.IsItemActive()) then
+        local hint_dl = imgui.GetWindowDrawList();
+        local hint_color = imgui.ColorConvertFloat4ToU32({ colors.muted[1], colors.muted[2], colors.muted[3], 0.6 });
+        hint_dl:AddText({ note_input_x + 4, note_input_y + 3 }, hint_color, 'Write a note...');
+    end
+    imgui.SetCursorPosX(imgui.GetCursorPosX() + pad);
     if (imgui.Button('+ Add##note')) then
         local note_text = trim_buf(ui.add_note_buf[1]);
         if (note_text ~= '') then
             local zone_name = ui.context.get_zone_name();
             ui.db.add_note(player.id, note_text, zone_name);
             ui.add_note_buf[1] = '';
+            note_heights = {};
         end
     end
     if (imgui.IsItemHovered()) then
@@ -706,76 +986,151 @@ local function render_player_detail()
     end
     imgui.Spacing();
 
-    local notes = ui.db.get_notes(player.id);
-
+    -- Scrollable notes region (inset within bubble, no border to avoid clipping)
     if (#notes > 0) then
-        for _, note in ipairs(notes) do
+        imgui.SetCursorPosX(imgui.GetCursorPosX() + pad);
+        imgui.BeginChild('##notes_scroll', { -(pad + 1), -50 }, ImGuiChildFlags_None);
+        local drawlist = imgui.GetWindowDrawList();
+        local region_w = imgui.GetContentRegionAvail();
+
+        for i, note in ipairs(notes) do
             imgui.PushID('note_' .. note.id);
 
-            -- Note card: metadata line then text
+            local is_pinned = (note.pinned == 1);
+            local card_start_x, card_start_y = imgui.GetCursorScreenPos();
+
+            -- Use cached height from previous frame (two-pass trick)
+            local cached_h = note_heights[note.id];
+            if (cached_h ~= nil and cached_h > 0) then
+                local bg_color = is_pinned and card_pinned_u32 or card_bg_u32;
+                local bar_color = is_pinned and accent_gold_u32 or accent_gray_u32;
+                -- Background rect
+                drawlist:AddRectFilled(
+                    { card_start_x, card_start_y },
+                    { card_start_x + region_w, card_start_y + cached_h },
+                    bg_color, 4.0
+                );
+                -- Left accent bar (4px wide)
+                drawlist:AddRectFilled(
+                    { card_start_x, card_start_y + 2 },
+                    { card_start_x + 4, card_start_y + cached_h - 2 },
+                    bar_color, 2.0
+                );
+            end
+
+            -- Indent past accent bar
+            imgui.SetCursorPosX(imgui.GetCursorPosX() + 10);
+
+            -- Header line: pin button + zone + date + actions
+            local pin_label = 'Pin##pin';
+            imgui.PushStyleColor(ImGuiCol_Text, is_pinned and colors.accent_gold or colors.muted);
+            if (imgui.SmallButton(pin_label)) then
+                ui.db.pin_note(note.id, player.id);
+                note_heights = {};
+            end
+            if (imgui.IsItemHovered()) then
+                imgui.SetTooltip(is_pinned and 'Unpin this note.' or 'Pin this note. Pinned notes appear first and show in alert toasts.');
+            end
+            imgui.PopStyleColor();
+            imgui.SameLine();
+
+            -- Zone name + date
             local meta = '';
-            if (note.zone_name ~= '') then
-                meta = note.zone_name .. ' | ';
+            if (note.zone_name ~= nil and note.zone_name ~= '') then
+                meta = note.zone_name .. '  ';
             end
             meta = meta .. fmt_time(note.created_at);
             imgui.TextColored(colors.muted, meta);
 
-            if (ui.edit_note_id == note.id) then
-                -- Edit mode
-                imgui.PushItemWidth(-80);
-                imgui.InputText('##edit_note', ui.edit_note_buf, ui.edit_note_size);
-                imgui.PopItemWidth();
+            if (is_pinned) then
                 imgui.SameLine();
+                imgui.TextColored(colors.accent_gold, '[Pinned]');
+            end
+
+            -- Action buttons (right-aligned on header line)
+            imgui.SameLine();
+            if (imgui.SmallButton('Edit##' .. note.id)) then
+                if (ui.edit_note_id == note.id) then
+                    ui.edit_note_id = nil;
+                else
+                    ui.edit_note_id = note.id;
+                    ui.edit_note_buf[1] = note.note;
+                end
+            end
+            if (imgui.IsItemHovered()) then
+                imgui.SetTooltip(ui.edit_note_id == note.id and 'Close editor.' or 'Edit this note.');
+            end
+            imgui.SameLine();
+            if (ui.confirm_delete_note == note.id) then
+                imgui.TextColored(colors.error, 'Delete?');
+                imgui.SameLine();
+                if (imgui.SmallButton('Y##ndel')) then
+                    ui.db.delete_note(note.id);
+                    ui.confirm_delete_note = nil;
+                    note_heights[note.id] = nil;
+                end
+                imgui.SameLine();
+                if (imgui.SmallButton('N##ncan')) then
+                    ui.confirm_delete_note = nil;
+                end
+            else
+                if (imgui.SmallButton('x##del_' .. note.id)) then
+                    ui.confirm_delete_note = note.id;
+                end
+                if (imgui.IsItemHovered()) then
+                    imgui.SetTooltip('Delete this note.');
+                end
+            end
+
+            -- Note body
+            imgui.SetCursorPosX(imgui.GetCursorPosX() + 10);
+            if (ui.edit_note_id == note.id) then
+                -- Edit mode: multiline input
+                imgui.InputTextMultiline('##edit_note', ui.edit_note_buf, ui.edit_note_size, { -10, 60 });
+                imgui.SetCursorPosX(imgui.GetCursorPosX() + 10);
                 if (imgui.Button('OK')) then
                     local new_text = trim_buf(ui.edit_note_buf[1]);
                     if (new_text ~= '') then
                         ui.db.update_note(note.id, new_text);
                     end
                     ui.edit_note_id = nil;
+                    note_heights = {};
                 end
                 imgui.SameLine();
-                if (imgui.Button('X')) then
+                if (imgui.Button('Cancel')) then
                     ui.edit_note_id = nil;
                 end
             else
                 -- Display mode
+                imgui.PushTextWrapPos(imgui.GetCursorPosX() + region_w - 20);
                 imgui.TextWrapped(note.note);
-                imgui.SameLine();
-                -- Edit button
-                if (imgui.SmallButton('Edit##' .. note.id)) then
-                    ui.edit_note_id = note.id;
-                    ui.edit_note_buf[1] = note.note;
-                end
-                imgui.SameLine();
-                -- Delete with confirmation
-                if (ui.confirm_delete_note == note.id) then
-                    imgui.TextColored(colors.error, 'Delete?');
-                    imgui.SameLine();
-                    if (imgui.SmallButton('Y##ndel')) then
-                        ui.db.delete_note(note.id);
-                        ui.confirm_delete_note = nil;
-                    end
-                    imgui.SameLine();
-                    if (imgui.SmallButton('N##ncan')) then
-                        ui.confirm_delete_note = nil;
-                    end
-                else
-                    if (imgui.SmallButton('x##del_' .. note.id)) then
-                        ui.confirm_delete_note = note.id;
-                    end
-                end
+                imgui.PopTextWrapPos();
             end
 
+            -- Measure card height for next frame
+            local card_end_y = select(2, imgui.GetCursorScreenPos());
+            note_heights[note.id] = card_end_y - card_start_y + 4;
+
             imgui.Spacing();
+            if (i < #notes) then
+                imgui.Separator();
+            end
+
             imgui.PopID();
         end
+        imgui.EndChild();
     else
+        imgui.SetCursorPosX(imgui.GetCursorPosX() + pad);
         imgui.TextColored(colors.muted, 'No notes yet.');
     end
 
+    imgui.Dummy({ 0, pad });
+    -- Measure notes panel height for next frame
+    local nt_end_y = select(2, imgui.GetCursorScreenPos());
+    notes_panel_h = nt_end_y - nt_y;
+
     -- Delete player button
     imgui.Spacing();
-    imgui.Separator();
     if (ui.confirm_delete_player == player.id) then
         imgui.TextColored(colors.error, 'Delete player and all notes?');
         imgui.SameLine();
@@ -802,6 +1157,9 @@ local function render_player_detail()
         ui.confirm_delete_player = nil;
         ui.confirm_delete_note = nil;
         ui.edit_note_id = nil;
+    end
+    if (imgui.IsItemHovered()) then
+        imgui.SetTooltip('Close this player detail panel.');
     end
 end
 
@@ -858,7 +1216,7 @@ local function render_players()
         ui.show_add_player[1] = true;
     end
     if (imgui.IsItemHovered()) then
-        imgui.SetTooltip('Add a new player profile.');
+        imgui.SetTooltip('Add a player by their character name.\nPlayer names only — no NPCs or monsters.\nLetters only, no spaces or numbers (auto-formatted: Firstname).\n3-15 characters.\nUse "From Target" to auto-fill from your current target (rejects NPCs).\nYou cannot track yourself.');
     end
 
     -- Get players (search > tag filter > all)
@@ -896,12 +1254,18 @@ local function render_players()
         + ImGuiTableFlags_ScrollY;
 
     local row_height = imgui.GetTextLineHeightWithSpacing();
-    local max_rows = 10;
     local header_height = row_height + 4;
-    local detail_height = (ui.selected_player_id ~= nil) and 300 or 0;
-    local _, avail_h = imgui.GetContentRegionAvail();
-    local max_table_h = header_height + (row_height * math.min(#players, max_rows));
-    local table_h = math.min(max_table_h, math.max((avail_h or 300) - detail_height - 4, 80));
+    local min_table_h = header_height + row_height;
+    local table_h;
+    if (table_user_h ~= nil) then
+        table_h = math_max(table_user_h, min_table_h);
+    else
+        local max_rows = 10;
+        local detail_height = (ui.selected_player_id ~= nil) and 300 or 0;
+        local _, avail_h = imgui.GetContentRegionAvail();
+        local max_table_h = header_height + (row_height * math_min(#players, max_rows));
+        table_h = math_min(max_table_h, math_max((avail_h or 300) - detail_height - 4, 80));
+    end
 
     if (imgui.BeginTable(tid('##players_tbl'), 5, table_flags, { 0, table_h })) then
         imgui.TableSetupScrollFreeze(0, 1);
@@ -957,15 +1321,10 @@ local function render_players()
                 end
             end
 
-            -- Rating stars
+            -- Rating stars (pre-computed lookup)
             imgui.TableNextColumn();
-            if (p.rating > 0) then
-                local stars = '';
-                for i = 1, p.rating do stars = stars .. '*'; end
-                imgui.TextColored(colors.star_on, stars);
-            else
-                imgui.TextColored(colors.star_off, '-');
-            end
+            local stars = star_strings[p.rating] or '-';
+            imgui.TextColored(p.rating > 0 and colors.star_on or colors.star_off, stars);
 
             -- Tags (colored)
             imgui.TableNextColumn();
@@ -982,6 +1341,50 @@ local function render_players()
 
         imgui.EndTable();
     end
+
+    -- Resize bar (draggable handle below table)
+    if (resize_bar_u32 == nil) then
+        resize_bar_u32       = imgui.ColorConvertFloat4ToU32({ 0.35, 0.35, 0.40, 1.0 });
+        resize_bar_hover_u32 = imgui.ColorConvertFloat4ToU32({ 0.5, 0.5, 0.55, 1.0 });
+    end
+    local bar_w = imgui.GetContentRegionAvail();
+    local bar_h = 6;
+    local bar_x, bar_y = imgui.GetCursorScreenPos();
+    imgui.InvisibleButton('##table_resize', { bar_w, bar_h });
+    local bar_hovered = imgui.IsItemHovered();
+    if (bar_hovered and not table_dragging) then
+        imgui.SetTooltip('Drag to resize table. Double-click to reset.');
+    end
+    local bar_active = imgui.IsItemActive();
+
+    -- Double-click to reset to auto height (check before drag so it takes priority)
+    if (bar_hovered and imgui.IsMouseDoubleClicked(0)) then
+        table_user_h = nil;
+        table_dragging = false;
+    elseif (bar_active) then
+        if (not table_dragging) then
+            table_dragging = true;
+            table_drag_start_y = select(2, imgui.GetMousePos());
+            table_drag_start_h = table_h;
+        end
+        local mouse_y = select(2, imgui.GetMousePos());
+        local delta = mouse_y - table_drag_start_y;
+        table_user_h = math_max(table_drag_start_h + delta, min_table_h);
+    else
+        table_dragging = false;
+    end
+
+    -- Draw the bar visual
+    local rdl = imgui.GetWindowDrawList();
+    local bar_color = (bar_hovered or bar_active) and resize_bar_hover_u32 or resize_bar_u32;
+    -- Full-width line
+    rdl:AddRectFilled({ bar_x, bar_y + 1 }, { bar_x + bar_w, bar_y + 3 }, bar_color, 1.0);
+    -- Grip dots (centered, 3 small squares)
+    local grip_cx = bar_x + bar_w * 0.5;
+    local grip_y = bar_y + 2;
+    rdl:AddRectFilled({ grip_cx - 10, grip_y }, { grip_cx - 6, grip_y + 2 }, bar_color, 0);
+    rdl:AddRectFilled({ grip_cx - 1, grip_y }, { grip_cx + 3, grip_y + 2 }, bar_color, 0);
+    rdl:AddRectFilled({ grip_cx + 8, grip_y }, { grip_cx + 12, grip_y + 2 }, bar_color, 0);
 
     -- Detail panel
     render_player_detail();
@@ -1004,7 +1407,7 @@ local function render_add_player_popup()
         imgui.Text('Name:');
         imgui.SameLine(label_w);
         imgui.PushItemWidth(160);
-        imgui.InputText('##new_pname', ui.new_name_buf, ui.new_name_size);
+        imgui.InputTextWithHint('##new_pname', 'Player name...', ui.new_name_buf, ui.new_name_size);
         imgui.PopItemWidth();
 
         -- Add from target button
@@ -1071,10 +1474,21 @@ local function render_add_player_popup()
         if (imgui.Button('Save Player', { 120, 0 })) then
             local pname = trim_buf(ui.new_name_buf[1]);
             local self_name = ui.context.get_player_name();
-            if (pname ~= '' and self_name ~= '' and pname:lower() == self_name:lower()) then
+            if (pname == '') then
+                ui.target_err = 'Name cannot be empty.';
+                ui.target_err_time = os_clock();
+            elseif (pname:find('[^%a]')) then
+                ui.target_err = 'Letters only — no spaces, numbers, or symbols.';
+                ui.target_err_time = os_clock();
+            elseif (#pname < 3 or #pname > 15) then
+                ui.target_err = 'Name must be 3-15 characters.';
+                ui.target_err_time = os_clock();
+            elseif (self_name ~= '' and pname:lower() == self_name:lower()) then
                 ui.target_err = 'Cannot track yourself.';
                 ui.target_err_time = os_clock();
-            elseif (pname ~= '') then
+            else
+                -- Auto-format: Firstname (first upper, rest lower)
+                pname = pname:sub(1, 1):upper() .. pname:sub(2):lower();
                 local tag_str = tags_to_string(ui.new_tags);
                 local player_id = ui.db.add_player(pname, ui.new_rating, tag_str);
 
@@ -1152,29 +1566,23 @@ local function render_settings()
         imgui.SetTooltip('Scans for tracked players nearby and in your party. All alerts require this to be enabled.');
     end
 
-    -- Detection sub-options (indented + greyed out when detection disabled)
-    if (not s.alert_known_players) then
-        imgui.PushStyleVar(ImGuiStyleVar_Alpha, 0.4);
-    end
+    -- Detection sub-options (indented + disabled when detection off)
+    imgui.BeginDisabled(not s.alert_known_players);
     imgui.Indent();
 
     local append_note = { s.toast_append_note, };
     if (imgui.Checkbox('Append latest note to alerts', append_note)) then
-        if (s.alert_known_players) then
-            s.toast_append_note = append_note[1];
-            ui.settings_dirty = true;
-        end
+        s.toast_append_note = append_note[1];
+        ui.settings_dirty = true;
     end
     if (imgui.IsItemHovered()) then
-        imgui.SetTooltip('When enabled, alert toasts will include the most recent note about the player.');
+        imgui.SetTooltip('Alert toasts will include the pinned note (if set) or the most recent note.');
     end
 
     local friend_town = { s.toast_friend_nearby_in_town, };
     if (imgui.Checkbox('Friend nearby alerts in town', friend_town)) then
-        if (s.alert_known_players) then
-            s.toast_friend_nearby_in_town = friend_town[1];
-            ui.settings_dirty = true;
-        end
+        s.toast_friend_nearby_in_town = friend_town[1];
+        ui.settings_dirty = true;
     end
     if (imgui.IsItemHovered()) then
         imgui.SetTooltip('When unchecked, Friend nearby alerts are suppressed in town zones.');
@@ -1182,19 +1590,15 @@ local function render_settings()
 
     local avoid_town = { s.toast_avoid_nearby_in_town ~= false, };
     if (imgui.Checkbox('Avoid nearby alerts in town', avoid_town)) then
-        if (s.alert_known_players) then
-            s.toast_avoid_nearby_in_town = avoid_town[1];
-            ui.settings_dirty = true;
-        end
+        s.toast_avoid_nearby_in_town = avoid_town[1];
+        ui.settings_dirty = true;
     end
     if (imgui.IsItemHovered()) then
         imgui.SetTooltip('When unchecked, Avoid nearby alerts are suppressed in town zones.');
     end
 
     imgui.Unindent();
-    if (not s.alert_known_players) then
-        imgui.PopStyleVar();
-    end
+    imgui.EndDisabled();
 
     imgui.Spacing();
     imgui.TextColored(colors.header, 'Toasts');
@@ -1207,7 +1611,16 @@ local function render_settings()
         ui.settings_dirty = true;
     end
     if (imgui.IsItemHovered()) then
-        imgui.SetTooltip('Master toggle for all toast alert sounds. Per-type toggles in Advanced.');
+        imgui.SetTooltip('Master toggle for all toast alert sounds. Clear individual filenames in Advanced to mute specific types.');
+    end
+
+    local click_dismiss = { s.toast_click_dismiss == true, };
+    if (imgui.Checkbox('Click to dismiss', click_dismiss)) then
+        s.toast_click_dismiss = click_dismiss[1];
+        ui.settings_dirty = true;
+    end
+    if (imgui.IsItemHovered()) then
+        imgui.SetTooltip('Click on a toast to immediately dismiss it.');
     end
 
     imgui.Spacing();
@@ -1224,14 +1637,17 @@ local function render_settings()
     end
 
     -- Toast position
-    if (imgui.SliderInt('Toast X position', ui.setting_toast_x, 0, 1920)) then
+    local screen_w, screen_h = imgui.GetIO().DisplaySize.x, imgui.GetIO().DisplaySize.y;
+    if (screen_w < 800) then screen_w = 3840; end
+    if (screen_h < 600) then screen_h = 2160; end
+    if (imgui.SliderInt('Toast X position', ui.setting_toast_x, 0, screen_w)) then
         s.toast_x = ui.setting_toast_x[1];
         ui.settings_dirty = true;
     end
     if (imgui.IsItemHovered()) then
         imgui.SetTooltip('Horizontal screen position for toast notifications.');
     end
-    if (imgui.SliderInt('Toast Y position', ui.setting_toast_y, 0, 1080)) then
+    if (imgui.SliderInt('Toast Y position', ui.setting_toast_y, 0, screen_h)) then
         s.toast_y = ui.setting_toast_y[1];
         ui.settings_dirty = true;
     end
@@ -1245,7 +1661,22 @@ local function render_settings()
         ui.show_advanced_toast[1] = not ui.show_advanced_toast[1];
     end
     if (imgui.IsItemHovered()) then
-        imgui.SetTooltip('Configure fade, colors, stacking, sounds, and more.');
+        imgui.SetTooltip('Configure animations, colors, layout, sounds, and more.');
+    end
+    imgui.SameLine();
+    if (imgui.Button('Test')) then
+        toast_test_index = toast_test_index + 1;
+        if (toast_test_index > #toast_test_types) then
+            toast_test_index = 1;
+        end
+        local t = toast_test_types[toast_test_index];
+        local name = ui.context.get_player_name();
+        if (name == '') then name = 'Player'; end
+        local text = t.fmt:find('%%s') and string_format(t.fmt, name) or t.fmt;
+        ui.show_toast(text, t.toast);
+    end
+    if (imgui.IsItemHovered()) then
+        imgui.SetTooltip('Click to show a sample toast. Each press cycles to the next type.');
     end
 
     imgui.Spacing();
@@ -1270,7 +1701,15 @@ local function render_settings()
     imgui.Separator();
     if (ui.defaults and imgui.Button('Restore Defaults')) then
         for k, v in pairs(ui.defaults) do
-            ui.settings[k] = v;
+            -- Deep-copy tables (color arrays) to avoid corrupting defaults
+            if (type(v) == 'table') then
+                ui.settings[k] = T{};
+                for i2, v2 in pairs(v) do
+                    ui.settings[k][i2] = v2;
+                end
+            else
+                ui.settings[k] = v;
+            end
         end
         ui.apply_settings(ui.settings);
         ui.settings_dirty = true;
@@ -1303,10 +1742,14 @@ local function render_advanced_toast_settings()
         return;
     end
 
-    -- Scan interval
-    imgui.TextColored(colors.header, 'Timing');
-    imgui.Separator();
+    local section_flags = bit.bor(ImGuiTreeNodeFlags_DefaultOpen, ImGuiTreeNodeFlags_NoTreePushOnOpen);
 
+    -- Scan interval
+    imgui.PushStyleColor(ImGuiCol_Text, colors.header);
+    local timing_open = imgui.TreeNodeEx('Timing', section_flags);
+    imgui.PopStyleColor();
+    imgui.Separator();
+    if (timing_open) then
     imgui.PushItemWidth(200);
     if (imgui.SliderInt('Check interval (seconds)', ui.setting_check_interval, 5, 60)) then
         s.player_check_interval = ui.setting_check_interval[1];
@@ -1316,11 +1759,15 @@ local function render_advanced_toast_settings()
     if (imgui.IsItemHovered()) then
         imgui.SetTooltip('How often to scan for nearby tracked players. Lower = more responsive, higher = less CPU.');
     end
+    end
 
     -- Animation section
     imgui.Spacing();
-    imgui.TextColored(colors.header, 'Animation');
+    imgui.PushStyleColor(ImGuiCol_Text, colors.header);
+    local anim_open = imgui.TreeNodeEx('Animation', section_flags);
+    imgui.PopStyleColor();
     imgui.Separator();
+    if (anim_open) then
 
     local fade_enabled = { s.toast_fade_enabled ~= false, };
     if (imgui.Checkbox('Fade enabled', fade_enabled)) then
@@ -1350,24 +1797,69 @@ local function render_advanced_toast_settings()
         imgui.PopItemWidth();
     end
 
-    -- Interaction section
-    imgui.Spacing();
-    imgui.TextColored(colors.header, 'Interaction');
-    imgui.Separator();
-
-    local click_dismiss = { s.toast_click_dismiss == true, };
-    if (imgui.Checkbox('Click to dismiss', click_dismiss)) then
-        s.toast_click_dismiss = click_dismiss[1];
+    local slide_enabled = { s.toast_slide_enabled == true, };
+    if (imgui.Checkbox('Slide enabled', slide_enabled)) then
+        s.toast_slide_enabled = slide_enabled[1];
         ui.settings_dirty = true;
     end
     if (imgui.IsItemHovered()) then
-        imgui.SetTooltip('Click on a toast to immediately dismiss it.');
+        imgui.SetTooltip('Enable slide-in and slide-out animation for toast notifications.');
     end
+
+    if (s.toast_slide_enabled) then
+        imgui.PushItemWidth(200);
+        if (imgui.SliderFloat('Slide in (sec)', ui.setting_slide_in, 0.0, 3.0, '%.1f')) then
+            s.toast_slide_in = ui.setting_slide_in[1];
+            ui.settings_dirty = true;
+        end
+        if (imgui.IsItemHovered()) then
+            imgui.SetTooltip('How long the toast takes to slide in. 0 = instant.');
+        end
+        if (imgui.SliderFloat('Slide out (sec)', ui.setting_slide_out, 0.0, 3.0, '%.1f')) then
+            s.toast_slide_out = ui.setting_slide_out[1];
+            ui.settings_dirty = true;
+        end
+        if (imgui.IsItemHovered()) then
+            imgui.SetTooltip('How long the toast takes to slide out before expiring.');
+        end
+        if (imgui.Combo('Slide direction', ui.setting_slide_dir, 'From left\0From right\0From top\0From bottom\0')) then
+            s.toast_slide_dir = ui.setting_slide_dir[1];
+            ui.settings_dirty = true;
+        end
+        if (imgui.IsItemHovered()) then
+            imgui.SetTooltip('Direction toasts slide in from off-screen.');
+        end
+        imgui.PopItemWidth();
+        local bounce = { s.toast_slide_bounce == true, };
+        if (imgui.Checkbox('Bounce', bounce)) then
+            s.toast_slide_bounce = bounce[1];
+            ui.settings_dirty = true;
+        end
+        if (imgui.IsItemHovered()) then
+            imgui.SetTooltip('Elastic overshoot on slide-in for a bouncy feel. Slide-out stays smooth.');
+        end
+        if (s.toast_slide_bounce) then
+            imgui.PushItemWidth(200);
+            if (imgui.SliderFloat('Bounce speed', ui.setting_bounce_speed, 0.15, 0.80, '%.2f')) then
+                s.toast_bounce_speed = ui.setting_bounce_speed[1];
+                ui.settings_dirty = true;
+            end
+            if (imgui.IsItemHovered()) then
+                imgui.SetTooltip('Controls bounce oscillation period. Lower = faster/tighter bounces, higher = slower/wider.');
+            end
+            imgui.PopItemWidth();
+        end
+    end
+
+    end -- Animation
 
     -- Layout section
     imgui.Spacing();
-    imgui.TextColored(colors.header, 'Layout');
+    imgui.PushStyleColor(ImGuiCol_Text, colors.header);
+    local layout_open = imgui.TreeNodeEx('Layout', section_flags);
+    imgui.PopStyleColor();
     imgui.Separator();
+    if (layout_open) then
 
     local stack_idx = { (s.toast_stack_down ~= false) and 0 or 1, };
     imgui.PushItemWidth(200);
@@ -1397,12 +1889,31 @@ local function render_advanced_toast_settings()
     end
     imgui.PopItemWidth();
 
+    end -- Layout
+
     -- Appearance section
     imgui.Spacing();
-    imgui.TextColored(colors.header, 'Appearance');
+    imgui.PushStyleColor(ImGuiCol_Text, colors.header);
+    local appear_open = imgui.TreeNodeEx('Appearance', section_flags);
+    imgui.PopStyleColor();
     imgui.Separator();
+    if (appear_open) then
 
     imgui.PushItemWidth(200);
+    if (imgui.SliderInt('Corner rounding', ui.setting_toast_rounding, 0, 16)) then
+        s.toast_rounding = ui.setting_toast_rounding[1];
+        ui.settings_dirty = true;
+    end
+    if (imgui.IsItemHovered()) then
+        imgui.SetTooltip('Rounded corner radius for toast windows. 0 = square.');
+    end
+    if (imgui.SliderFloat('Border size', ui.setting_toast_border, 0.0, 3.0, '%.1f')) then
+        s.toast_border = ui.setting_toast_border[1];
+        ui.settings_dirty = true;
+    end
+    if (imgui.IsItemHovered()) then
+        imgui.SetTooltip('Border thickness around toast windows. 0 = no border.');
+    end
     if (imgui.SliderFloat('Background opacity', ui.setting_bg_opacity, 0.1, 1.0, '%.2f')) then
         s.toast_bg_opacity = ui.setting_bg_opacity[1];
         ui.settings_dirty = true;
@@ -1419,42 +1930,77 @@ local function render_advanced_toast_settings()
     if (imgui.IsItemHovered()) then
         imgui.SetTooltip('Toast notification background color.');
     end
+    if (imgui.ColorEdit3('Border color', ui.setting_toast_border_color)) then
+        s.toast_border_color = T{ ui.setting_toast_border_color[1], ui.setting_toast_border_color[2], ui.setting_toast_border_color[3] };
+        ui.settings_dirty = true;
+    end
+    if (imgui.IsItemHovered()) then
+        imgui.SetTooltip('Border color for toast windows. Set border size above 0 to see it.');
+    end
+
+    end -- Appearance
 
     -- Text Colors section
     imgui.Spacing();
-    imgui.TextColored(colors.header, 'Text Colors');
+    imgui.PushStyleColor(ImGuiCol_Text, colors.header);
+    local tcolors_open = imgui.TreeNodeEx('Text Colors', section_flags);
+    imgui.PopStyleColor();
     imgui.Separator();
+    if (tcolors_open) then
 
     if (imgui.ColorEdit3('Player alert', ui.setting_color_player_alert)) then
         s.toast_color_player_alert = T{ ui.setting_color_player_alert[1], ui.setting_color_player_alert[2], ui.setting_color_player_alert[3] };
         ui.settings_dirty = true;
     end
+    if (imgui.IsItemHovered()) then
+        imgui.SetTooltip('Text color for tracked player party join alerts.');
+    end
     if (imgui.ColorEdit3('Friend alert', ui.setting_color_friend_alert)) then
         s.toast_color_friend_alert = T{ ui.setting_color_friend_alert[1], ui.setting_color_friend_alert[2], ui.setting_color_friend_alert[3] };
         ui.settings_dirty = true;
+    end
+    if (imgui.IsItemHovered()) then
+        imgui.SetTooltip('Text color for Friend-tagged player party join alerts.');
     end
     if (imgui.ColorEdit3('Friend nearby', ui.setting_color_friend_nearby)) then
         s.toast_color_friend_nearby = T{ ui.setting_color_friend_nearby[1], ui.setting_color_friend_nearby[2], ui.setting_color_friend_nearby[3] };
         ui.settings_dirty = true;
     end
+    if (imgui.IsItemHovered()) then
+        imgui.SetTooltip('Text color for Friend-tagged player proximity alerts.');
+    end
     if (imgui.ColorEdit3('Avoid alert', ui.setting_color_avoid_alert)) then
         s.toast_color_avoid_alert = T{ ui.setting_color_avoid_alert[1], ui.setting_color_avoid_alert[2], ui.setting_color_avoid_alert[3] };
         ui.settings_dirty = true;
+    end
+    if (imgui.IsItemHovered()) then
+        imgui.SetTooltip('Text color for Avoid-tagged player party join warnings.');
     end
     if (imgui.ColorEdit3('Avoid nearby', ui.setting_color_avoid_nearby)) then
         s.toast_color_avoid_nearby = T{ ui.setting_color_avoid_nearby[1], ui.setting_color_avoid_nearby[2], ui.setting_color_avoid_nearby[3] };
         ui.settings_dirty = true;
     end
+    if (imgui.IsItemHovered()) then
+        imgui.SetTooltip('Text color for Avoid-tagged player proximity warnings.');
+    end
     if (imgui.ColorEdit3('Disband', ui.setting_color_disband)) then
         s.toast_color_disband = T{ ui.setting_color_disband[1], ui.setting_color_disband[2], ui.setting_color_disband[3] };
         ui.settings_dirty = true;
     end
+    if (imgui.IsItemHovered()) then
+        imgui.SetTooltip('Text color for party disband notifications.');
+    end
+
+    end -- Text Colors
 
     -- Per-type toast selection
     imgui.Spacing();
-    imgui.TextColored(colors.header, 'Alert Types');
+    imgui.PushStyleColor(ImGuiCol_Text, colors.header);
+    local alerts_open = imgui.TreeNodeEx('Alert Types', section_flags);
+    imgui.PopStyleColor();
     imgui.Separator();
-    imgui.TextColored(colors.muted, 'Toggle each alert type. Clear the filename to disable its sound.');
+    if (alerts_open) then
+    imgui.TextColored(colors.muted, 'Uncheck to disable an alert. Clear the filename to mute just its sound.');
     imgui.Spacing();
 
     -- Per-type sound toggles with test buttons and file inputs (aligned columns)
@@ -1475,6 +2021,9 @@ local function render_advanced_toast_settings()
             s[toggle_key] = cb[1];
             ui.settings_dirty = true;
         end
+        if (imgui.IsItemHovered()) then
+            imgui.SetTooltip('Enable or disable the ' .. st.label .. ' alert. Clear the filename to mute just the sound.');
+        end
         imgui.SameLine(col_test);
         if (imgui.Button('Test##snd_' .. st.key)) then
             local name = ui.context.get_player_name();
@@ -1494,9 +2043,13 @@ local function render_advanced_toast_settings()
             s[st.file_key] = trim_buf(st.file_buf[1]);
             ui.settings_dirty = true;
         end
+        if (imgui.IsItemHovered()) then
+            imgui.SetTooltip('Sound file for ' .. st.label .. '. Clear to mute sound. Must be in the sounds/ folder.');
+        end
         imgui.PopItemWidth();
     end
     imgui.TextColored(colors.muted, 'Files must be in the sounds/ folder.');
+    end -- Alert Types
 
     -- Close button
     imgui.Spacing();
@@ -1537,6 +2090,7 @@ local function render_status_bar()
     if (imgui.IsItemHovered()) then
         imgui.SetTooltip('Reset window size, position, and column widths to defaults.');
     end
+    imgui.Dummy({ 0, 4 });
 end
 
 -------------------------------------------------------------------------------
@@ -1544,6 +2098,9 @@ end
 -------------------------------------------------------------------------------
 
 function ui.render()
+    -- Don't render anything until character is logged in and DB is ready
+    if (ui.db == nil or ui.db.conn == nil) then return; end
+
     if (not ui.is_open[1]) then
         render_settings();
         render_advanced_toast_settings();
@@ -1572,7 +2129,7 @@ function ui.render()
 
     if (imgui.Begin('PlayerNotes', ui.is_open, ImGuiWindowFlags_None)) then
         -- Content area (single view, no tabs)
-        imgui.BeginChild('##pn_content', { 0, -24 });
+        imgui.BeginChild('##pn_content', { 0, -30 });
         render_players();
         imgui.EndChild();
 
@@ -1597,9 +2154,10 @@ local function maybe_append_note(text, player)
     local s = ui.settings;
     if (s == nil or not s.toast_append_note) then return text; end
 
+    -- get_notes returns pinned first (ORDER BY pinned DESC, created_at DESC)
     local notes = ui.db.get_notes(player.id);
-    if (#notes > 0) then
-        local snippet = notes[1].note;
+    local snippet = notes[1] and notes[1].note;
+    if (snippet ~= nil) then
         if (#snippet > 50) then
             snippet = snippet:sub(1, 47) .. '...';
         end
@@ -1611,6 +2169,7 @@ end
 function ui.check_party_alerts(party, get_player_by_name)
     if (not ui.settings.alert_known_players) then return; end
 
+    local s = ui.settings;
     for _, p in ipairs(party) do
         if (ui.alerted_players[p.name]) then
             -- Already alerted this zone
@@ -1620,13 +2179,13 @@ function ui.check_party_alerts(party, get_player_by_name)
                 ui.alerted_players[p.name] = true;
                 local tags = player.tags or '';
                 local msg;
-                if (tags:find('Avoid')) then
+                if (tags:find('Avoid') and s.toast_sound_avoid_alert ~= false) then
                     msg = maybe_append_note(string_format('WARNING: %s joined party — Avoid', p.name), player);
                     ui.show_toast(msg, 'avoid_alert');
-                elseif (tags:find('Friend')) then
+                elseif (tags:find('Friend') and s.toast_sound_friend_alert ~= false) then
                     msg = maybe_append_note(string_format('%s joined party (Friend)', p.name), player);
                     ui.show_toast(msg, 'friend_alert');
-                else
+                elseif (s.toast_sound_player_alert ~= false) then
                     msg = maybe_append_note(string_format('%s joined party', p.name), player);
                     ui.show_toast(msg, 'player_alert');
                 end
@@ -1649,11 +2208,11 @@ function ui.check_nearby_alerts(nearby, get_player_by_name, in_town)
             local player = get_player_by_name(p.name);
             if (player ~= nil) then
                 local tags = player.tags or '';
-                if (tags:find('Avoid') and allow_avoid) then
+                if (tags:find('Avoid') and allow_avoid and s.toast_sound_avoid_nearby ~= false) then
                     ui.alerted_players[p.name] = true;
                     local msg = maybe_append_note(string_format('WARNING: %s nearby — Avoid', p.name), player);
                     ui.show_toast(msg, 'avoid_nearby');
-                elseif (tags:find('Friend') and allow_friend) then
+                elseif (tags:find('Friend') and allow_friend and s.toast_sound_friend_nearby ~= false) then
                     ui.alerted_players[p.name] = true;
                     local msg = maybe_append_note(string_format('%s is nearby (Friend)', p.name), player);
                     ui.show_toast(msg, 'friend_nearby');
