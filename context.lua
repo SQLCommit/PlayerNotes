@@ -1,9 +1,9 @@
 --[[
-    PlayerNotes v1.2.1 - Game Context Capture
+    PlayerNotes v1.0.0 - Game Context Capture
     Captures zone, party, nearby player, and target info from game APIs.
 
     Author: SQLCommit
-    Version: 1.2.1
+    Version: 1.0.0
 ]]--
 
 require 'common';
@@ -112,9 +112,10 @@ function context.get_party_members()
     -- Scan entity array: for each party member name, check entity type.
     -- Type 0 = PC (confirmed player), anything else = trust/NPC.
     -- This catches trusts even when GetMemberIndex returns 0.
+    -- Range: PCs at 1024-1791, trusts/pets at 1792-2303 (entity map size 2304).
     local entity_is_pc = {};
     if (entity_mgr ~= nil) then
-        for j = 1, 2047 do
+        for j = 1024, 2303 do
             if (entity_mgr:GetRenderFlags0(j) ~= 0) then
                 local ename = entity_mgr:GetName(j);
                 if (ename ~= nil and name_set[ename]) then
@@ -186,7 +187,8 @@ function context.get_nearby_players()
     local entity_mgr = mem:GetEntity();
     if (entity_mgr == nil) then return players; end
 
-    for i = 1, 2047 do
+    -- PCs are only at entity indices 1024-1791.
+    for i = 1024, 1791 do
         local render = entity_mgr:GetRenderFlags0(i);
         if (render ~= 0) then
             local etype = entity_mgr:GetType(i);

@@ -1,5 +1,5 @@
 --[[
-    PlayerNotes v1.2.1 - Player Tracking Addon for Ashita v4
+    PlayerNotes v1.0.0 - Player Tracking Addon for Ashita v4
 
     Track players you meet in FFXI with ratings, tags, and notes.
     Get toast alerts when tracked players appear nearby or join
@@ -9,7 +9,7 @@
         /pn                      - Toggle the PlayerNotes window
         /pn show / hide          - Show or hide the window
         /pn <name> <note>        - Quick note on a player
-        /pn rate <name> <1-5>    - Set player rating
+        /pn rate <name> <0-5>    - Set player rating (0 to clear)
         /pn tag <name> <tag>     - Toggle tag on a player
         /pn search <term>        - Search players
         /pn export               - Export all data to JSON (shared folder)
@@ -19,12 +19,12 @@
         /pn help                 - Show commands
 
     Author: SQLCommit
-    Version: 1.2.1
+    Version: 1.0.0
 ]]--
 
 addon.name    = 'playernotes';
 addon.author  = 'SQLCommit';
-addon.version = '1.2.1';
+addon.version = '1.0.0';
 addon.desc    = 'Player tracking with ratings, tags, and notes.';
 addon.link    = 'https://github.com/SQLCommit/playernotes';
 
@@ -135,7 +135,7 @@ local function print_help()
         { '/pn',                        'Toggle the PlayerNotes window.' },
         { '/pn show / hide',            'Show or hide the window.' },
         { '/pn <name> <note>',          'Quick note on a player.' },
-        { '/pn rate <name> <1-5>',      'Set player rating.' },
+        { '/pn rate <name> <0-5>',      'Set player rating (0 to clear).' },
         { '/pn tag <name> <tag>',       'Toggle tag (Healer/Tank/DPS/Mage/Support/Crafter/Friend/Avoid/Mentor).' },
         { '/pn search <term>',          'Search players by name or tag.' },
         { '/pn export',                 'Export all data to a JSON file (shared across characters).' },
@@ -179,6 +179,7 @@ ashita.events.register('unload', 'playernotes_unload', function ()
     ui.sync_settings();
     settings.save();
     db.close();
+    context.clear_player_cache();
 end);
 
 ashita.events.register('command', 'playernotes_command', function (e)

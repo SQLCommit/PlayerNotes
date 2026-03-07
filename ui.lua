@@ -1,10 +1,10 @@
 --[[
-    PlayerNotes v1.2.1 - ImGui UI Rendering
+    PlayerNotes v1.0.0 - ImGui UI Rendering
     Single-view layout: toolbar (search + tag filter + add) + sortable table + detail panel.
     Player detail panel with star ratings, tag toggles, and notes.
 
     Author: SQLCommit
-    Version: 1.2.1
+    Version: 1.0.0
 ]]--
 
 require 'common';
@@ -179,7 +179,6 @@ local accent_gray_u32 = nil;
 local shadow_u32 = nil;
 local panel_bg_u32 = nil;
 local panel_border_u32 = nil;
-local divider_orange_u32 = nil;
 
 -- Note card height cache (two-pass rendering: first pass measures, second draws)
 local note_heights = {};
@@ -466,14 +465,6 @@ local toast_color_keys = {
     avoid_nearby  = 'toast_color_avoid_nearby',
     disband       = 'toast_color_disband',
 };
-local toast_sound_toggle_keys = {
-    player_alert  = 'toast_sound_player_alert',
-    friend_alert  = 'toast_sound_friend_alert',
-    friend_nearby = 'toast_sound_friend_nearby',
-    avoid_alert   = 'toast_sound_avoid_alert',
-    avoid_nearby  = 'toast_sound_avoid_nearby',
-    disband       = 'toast_sound_disband',
-};
 local toast_sound_file_keys = {
     player_alert  = 'toast_sound_player_alert_file',
     friend_alert  = 'toast_sound_friend_alert_file',
@@ -670,6 +661,11 @@ end
 -- Disband Popup
 -------------------------------------------------------------------------------
 
+-- Disband member card height cache (two-pass)
+local disband_card_heights = {};
+local disband_size_set = false;
+local disband_cached_h = 0;
+
 function ui.show_disband_popup(names)
     ui.disband_open = true;
     disband_size_set = false;
@@ -689,11 +685,6 @@ function ui.show_disband_popup(names)
         ui.show_toast('Party disbanded — add notes?', 'disband');
     end
 end
-
--- Disband member card height cache (two-pass)
-local disband_card_heights = {};
-local disband_size_set = false;
-local disband_cached_h = 0;
 
 local function render_disband_popup()
     if (not ui.disband_open) then return; end
@@ -785,7 +776,7 @@ local function render_disband_popup()
                 -- Note
                 imgui.SetCursorPosX(imgui.GetCursorPosX() + dpad);
                 imgui.PushItemWidth(dpanel_w - dpad * 2 - 60);
-                imgui.InputText('##disband_note_' .. i, member.note_buf, member.note_size);
+                imgui.InputTextWithHint('##disband_note_' .. i, 'Add a note...', member.note_buf, member.note_size);
                 imgui.PopItemWidth();
                 imgui.SameLine();
                 if (imgui.Button('Save##dsave_' .. i)) then
@@ -887,7 +878,6 @@ local function render_player_detail()
         shadow_u32       = imgui.ColorConvertFloat4ToU32({ 0.0, 0.0, 0.0, 0.15 });
         panel_bg_u32     = imgui.ColorConvertFloat4ToU32({ 0.22, 0.22, 0.26, 1.0 });
         panel_border_u32 = imgui.ColorConvertFloat4ToU32({ 0.35, 0.35, 0.40, 1.0 });
-        divider_orange_u32 = imgui.ColorConvertFloat4ToU32({ colors.header[1], colors.header[2], colors.header[3], 1.0 });
     end
 
     local pad = 8;
@@ -1459,7 +1449,13 @@ local function render_add_player_popup()
         imgui.Text('Note:');
         imgui.SameLine(label_w);
         imgui.PushItemWidth(-1);
+        local note_cx, note_cy = imgui.GetCursorScreenPos();
         imgui.InputTextMultiline('##new_pnote', ui.new_note_buf, ui.new_note_size, { -1, 80 });
+        local buf_empty = (ui.new_note_buf[1] == nil or ui.new_note_buf[1] == '' or ui.new_note_buf[1]:byte(1) == 0);
+        if (buf_empty and not imgui.IsItemActive()) then
+            local hint_col = imgui.ColorConvertFloat4ToU32({ colors.muted[1], colors.muted[2], colors.muted[3], 0.6 });
+            imgui.GetWindowDrawList():AddText({ note_cx + 4, note_cy + 3 }, hint_col, 'Add a note...');
+        end
         imgui.PopItemWidth();
 
         -- Context preview
@@ -2121,6 +2117,7 @@ function ui.render()
         ui.tag_filter = nil;
         ui.sort_col = 0;
         ui.sort_asc = true;
+        table_user_h = nil;
         imgui.SetNextWindowSize({ 580, 440, }, ImGuiCond_Always);
         imgui.SetNextWindowPos({ 100, 100, }, ImGuiCond_Always);
     end

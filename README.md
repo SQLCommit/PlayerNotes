@@ -1,4 +1,4 @@
-# PlayerNotes v1.2.1 - Player Tracking Addon for Ashita v4.3
+# PlayerNotes v1.0.0 - Player Tracking Addon for Ashita v4.3
 
 Player tracking addon for Ashita v4.3. Rate, tag, and take notes on players you meet in Final Fantasy XI. Get toast alerts when tracked players appear nearby or join your party.
 
@@ -173,16 +173,6 @@ Settings are saved per-character via Ashita's settings library.
 - Background color and opacity
 - Per-type text colors
 - Max visible toasts
-
-## Server Impact
-
-**None.** PlayerNotes is entirely client-side:
-- Entity scanning reads client memory only (no packets sent)
-- Party and target data from Ashita's memory API
-- SQLite database is local storage only
-- No GM commands, no outgoing packets
-
-Safe for use on any server (retail or private).
 
 ## Technical Notes
 

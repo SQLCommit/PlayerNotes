@@ -1,5 +1,5 @@
 --[[
-    PlayerNotes v1.2.1 - SQLite3 Persistence Layer
+    PlayerNotes v1.0.0 - SQLite3 Persistence Layer
     Two-table schema: players, notes.
     Uses Ashita v4.30's built-in LuaSQLite3 with dirty-flag caching.
 
@@ -19,7 +19,7 @@
         stmt:finalize()                 -- Finalize statement
 
     Author: SQLCommit
-    Version: 1.2.1
+    Version: 1.0.0
 ]]--
 
 require 'common';
@@ -48,6 +48,7 @@ db.search_cache = nil;
 db.search_cache_term = '';
 db.player_lookup_cache = {};
 db.player_miss_cache = {};  -- negative cache: names confirmed not in DB
+db.player_id_cache = {};
 db.note_counts_cache = {};
 db.tag_cache = nil;
 db.tag_cache_tag = '';
@@ -312,7 +313,6 @@ function db.get_player_by_id(id)
     if (db.conn == nil) then return nil; end
 
     -- Check cache first (called per-frame when detail panel is open)
-    if (db.player_id_cache == nil) then db.player_id_cache = {}; end
     if (db.player_id_cache[id] ~= nil) then
         return db.player_id_cache[id];
     end
@@ -401,7 +401,6 @@ function db.add_note(player_id, note, zone_name)
     db.note_counts_cache[player_id] = nil;
     db.players_dirty = true;
     db.search_dirty = true;
-    db.tag_cache = nil;
     db.player_lookup_cache = {};
 
     return db.conn:last_insert_rowid();
@@ -555,24 +554,6 @@ function db.pin_note(note_id, player_id)
 
     db.notes_dirty = true;
     db.notes_cache[player_id] = nil;
-end
-
---- Get the pinned note for a player, or nil if none pinned.
-function db.get_pinned_note(player_id)
-    if (db.conn == nil) then return nil; end
-
-    local result = nil;
-    local stmt = db.conn:prepare('SELECT * FROM notes WHERE player_id = ? AND pinned = 1 LIMIT 1');
-    if (stmt == nil) then return nil; end
-    pcall(function()
-        stmt:bind_values(player_id);
-        for row in stmt:nrows() do
-            result = row;
-        end
-    end);
-    stmt:finalize();
-
-    return result;
 end
 
 -------------------------------------------------------------------------------
