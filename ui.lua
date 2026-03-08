@@ -1567,7 +1567,7 @@ local function render_settings()
     imgui.Indent();
 
     local append_note = { s.toast_append_note, };
-    if (imgui.Checkbox('Append latest note to alerts', append_note)) then
+    if (imgui.Checkbox('Append pinned note to alerts', append_note)) then
         s.toast_append_note = append_note[1];
         ui.settings_dirty = true;
     end
@@ -2146,7 +2146,7 @@ end
 -- Public: Player alert check (called from main loop)
 -------------------------------------------------------------------------------
 
---- Append latest note snippet to toast text if setting is enabled.
+--- Append pinned (or latest) note snippet to toast text if setting is enabled.
 local function maybe_append_note(text, player)
     local s = ui.settings;
     if (s == nil or not s.toast_append_note) then return text; end
