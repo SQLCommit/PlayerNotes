@@ -1,18 +1,11 @@
---[[
-    PlayerNotes v1.0.0 - Game Context Capture
-    Captures zone, party, nearby player, and target info from game APIs.
-
-    Author: SQLCommit
-    Version: 1.0.0
-]]--
+-- PlayerNotes game context: zone, party, nearby players, and target.
+-- Author: SQLCommit
 
 require 'common';
 
 local context = {};
 
--------------------------------------------------------------------------------
 -- Town Zone IDs
--------------------------------------------------------------------------------
 local town_zones = {
     [230] = true, [231] = true, [232] = true, [233] = true,  -- San d'Oria
     [234] = true, [235] = true, [236] = true, [237] = true,  -- Bastok
@@ -30,16 +23,12 @@ local town_zones = {
     [256] = true, [257] = true, -- Adoulin
 };
 
---- Check if a zone ID is a town zone.
 function context.is_town_zone(zone_id)
     return town_zones[zone_id] == true;
 end
 
--------------------------------------------------------------------------------
 -- Zone
--------------------------------------------------------------------------------
 
---- Get current zone ID.
 function context.get_zone_id()
     local mem = AshitaCore:GetMemoryManager();
     if (mem ~= nil) then
@@ -51,7 +40,7 @@ function context.get_zone_id()
     return 0;
 end
 
---- Get current zone name (cached per zone_id).
+-- Cache zone names by zone ID.
 local cached_zone_id = 0;
 local cached_zone_name = '';
 
@@ -73,17 +62,32 @@ function context.get_zone_name()
     return '';
 end
 
--------------------------------------------------------------------------------
--- Party
--------------------------------------------------------------------------------
+-- Presence
 
---- Trust name cache: populated from entity type scans and idx >= 1792.
---- Survives zone transitions so despawned trusts are still recognized.
+-- Require an actor pointer and a clear invisible bit before using entity identity.
+-- Departed slots retain names and IDs, so RenderFlags0 alone is insufficient.
+-- This presence rule is verified for mobs; its use for PCs assumes shared entity semantics.
+local function is_present(entity_mgr, i)
+    if (entity_mgr == nil) then return false; end
+    local ok, live = pcall(function()
+        local ap = entity_mgr:GetActorPointer(i);
+        if (ap == nil or ap == 0) then return false; end
+        local f2 = entity_mgr:GetRenderFlags2(i) or 0;
+        if (bit.band(f2, 0x40) ~= 0) then return false; end
+        return true;
+    end);
+    -- If an accessor is unavailable, fall back rather than hiding every player.
+    if (not ok) then return true; end
+    return live;
+end
+
+-- Party
+
+-- Retain trust names across zoning to recognize despawned trusts.
 local known_trust_names = {};
 
---- Get active party member names (indices 1-5, skipping self at 0).
---- Filters trusts using entity type scan, index range, and name cache.
---- Returns a table of { name = string }.
+-- Return party names excluding self and trusts. Use each member's target entity index:
+-- GetMemberIndex may be zero or stale, and a render-only scan misses unrendered trusts.
 function context.get_party_members()
     local members = {};
     local mem = AshitaCore:GetMemoryManager();
@@ -94,7 +98,6 @@ function context.get_party_members()
 
     local entity_mgr = mem:GetEntity();
 
-    -- Collect active party member names
     local slots = {};
     local name_set = {};
     for i = 1, 5 do
@@ -109,16 +112,52 @@ function context.get_party_members()
 
     if (#slots == 0) then return members; end
 
-    -- Scan entity array: for each party member name, check entity type.
-    -- Type 0 = PC (confirmed player), anything else = trust/NPC.
-    -- This catches trusts even when GetMemberIndex returns 0.
-    -- Range: PCs at 1024-1791, trusts/pets at 1792-2303 (entity map size 2304).
+    -- Classify from the member's entity first. The trust/pet range starts at 1792;
+    -- otherwise confirm the entity name before trusting its type to avoid stale indices.
+    local verdict = {};   -- name -> true (PC) / false (trust); nil = undecided, pass 2 decides
+    for _, s in ipairs(slots) do
+        local eidx = party:GetMemberTargetIndex(s.slot) or 0;
+        if (entity_mgr ~= nil and eidx > 0 and eidx < 2304) then
+            if (eidx >= 1792) then
+                -- A PC-typed slot contradicts the trust range; defer stale indices to the fallback scan.
+                local ok, etype = pcall(function() return entity_mgr:GetType(eidx); end);
+                if (ok and etype == 0 and entity_mgr:GetName(eidx) ~= s.name) then
+                    -- stale: stay silent, pass 2 decides
+                else
+                    verdict[s.name] = false;
+                    known_trust_names[s.name] = true;
+                end
+            else
+                local ok, etype = pcall(function()
+                    if (entity_mgr:GetName(eidx) ~= s.name) then return nil; end
+                    return entity_mgr:GetType(eidx);
+                end);
+                if (ok and etype ~= nil) then
+                    if (etype == 0) then
+                        verdict[s.name] = true;
+                        known_trust_names[s.name] = nil;
+                    else
+                        verdict[s.name] = false;
+                        known_trust_names[s.name] = true;
+                    end
+                end
+            end
+        end
+    end
+
+    -- Fallback to rendered entities for members whose target index could not be classified.
+    local need_fallback = false;
+    for _, s in ipairs(slots) do
+        if (verdict[s.name] == nil) then need_fallback = true; break; end
+    end
+
     local entity_is_pc = {};
-    if (entity_mgr ~= nil) then
+    if (need_fallback and entity_mgr ~= nil) then
+        -- Scan the entity array by name. Range: PCs at 1024-1791, trusts/pets at 1792-2303.
         for j = 1024, 2303 do
             if (entity_mgr:GetRenderFlags0(j) ~= 0) then
                 local ename = entity_mgr:GetName(j);
-                if (ename ~= nil and name_set[ename]) then
+                if (ename ~= nil and name_set[ename] and verdict[ename] == nil) then
                     if (entity_mgr:GetType(j) == 0) then
                         entity_is_pc[ename] = true;
                         known_trust_names[ename] = nil;
@@ -130,34 +169,83 @@ function context.get_party_members()
         end
     end
 
-    -- Classify each party member
     for _, s in ipairs(slots) do
-        local idx = party:GetMemberIndex(s.slot);
-        local include = false;
+        local include;
 
-        if (idx ~= nil and idx >= 1792) then
-            -- Trust/pet entity range (0x700+)
-            known_trust_names[s.name] = true;
-        elseif (entity_is_pc[s.name]) then
-            -- Confirmed PC entity in our zone (type 0)
-            include = true;
-        elseif (known_trust_names[s.name]) then
-            -- Cached trust name (from entity scan or previous check)
-            include = false;
+        if (verdict[s.name] ~= nil) then
+            include = verdict[s.name];
         else
-            -- Not in our entity array and not a known trust = remote PC
-            include = true;
+            local idx = party:GetMemberIndex(s.slot);
+            if (idx ~= nil and idx >= 1792) then
+                known_trust_names[s.name] = true;
+                include = false;
+            elseif (entity_is_pc[s.name]) then
+                include = true;
+            elseif (known_trust_names[s.name]) then
+                include = false;
+            else
+                include = true;
+            end
         end
 
         if (include) then
-            members[#members + 1] = { name = s.name };
+            -- Carry the server ID to distinguish characters sharing a name.
+            local sid = 0;
+            local eidx = party:GetMemberTargetIndex(s.slot) or 0;
+            if (entity_mgr ~= nil and eidx > 0 and eidx < 2304) then
+                pcall(function()
+                    -- Require presence before reading identity; departed slots retain matching names and
+                    -- IDs.
+                    if (entity_mgr:GetName(eidx) == s.name and is_present(entity_mgr, eidx)) then
+                        sid = entity_mgr:GetServerId(eidx) or 0;
+                    end
+                end);
+            end
+            if (sid == 0) then
+                -- GetMemberServerId reads 0 on LSB, so it is the fallback, never the first choice.
+                local ok, msid = pcall(function() return party:GetMemberServerId(s.slot); end);
+                if (ok and msid ~= nil) then sid = msid; end
+            end
+            members[#members + 1] = { name = s.name, server_id = sid or 0 };
         end
     end
 
     return members;
 end
 
---- Check if player is currently in an alliance (indices 6-17).
+-- Resolve a loaded PC by name. Return zero when absent or ambiguous.
+function context.find_server_id(name)
+    if (name == nil or name == '') then return 0; end
+    local mem = AshitaCore:GetMemoryManager();
+    if (mem == nil) then return 0; end
+    local entity_mgr = mem:GetEntity();
+    if (entity_mgr == nil) then return 0; end
+
+    local found, hits = 0, 0;
+    local lname = name:lower();
+    for i = 1024, 1791 do
+        local ok = pcall(function()
+            if (entity_mgr:GetRenderFlags0(i) == 0) then return; end
+            -- Do not bind a profile from a departed player's stale slot.
+            if (not is_present(entity_mgr, i)) then return; end
+            if (entity_mgr:GetType(i) ~= 0) then return; end
+            local ename = entity_mgr:GetName(i);
+            if (ename ~= nil and ename:lower() == lname) then
+                hits = hits + 1;
+                found = entity_mgr:GetServerId(i) or 0;
+            end
+        end);
+        if (not ok) then return 0; end
+    end
+    if (hits ~= 1) then return 0; end
+    return found;
+end
+
+-- Retain known trust names so previously unclassified roster entries can be filtered later.
+function context.is_known_trust(name)
+    return known_trust_names[name] == true;
+end
+
 function context.is_alliance()
     local mem = AshitaCore:GetMemoryManager();
     if (mem == nil) then return false; end
@@ -173,12 +261,9 @@ function context.is_alliance()
     return false;
 end
 
--------------------------------------------------------------------------------
 -- Nearby Players
--------------------------------------------------------------------------------
 
---- Scan entity array for nearby player characters.
---- Returns a table of { name = string, server_id = number }.
+-- Return nearby PCs as {name, server_id}.
 function context.get_nearby_players()
     local players = {};
     local mem = AshitaCore:GetMemoryManager();
@@ -190,7 +275,7 @@ function context.get_nearby_players()
     -- PCs are only at entity indices 1024-1791.
     for i = 1024, 1791 do
         local render = entity_mgr:GetRenderFlags0(i);
-        if (render ~= 0) then
+        if (render ~= 0 and is_present(entity_mgr, i)) then
             local etype = entity_mgr:GetType(i);
             if (etype == 0) then
                 local name = entity_mgr:GetName(i);
@@ -207,11 +292,9 @@ function context.get_nearby_players()
     return players;
 end
 
--------------------------------------------------------------------------------
 -- Player Name
--------------------------------------------------------------------------------
 
---- Get the local player's character name (cached after first successful read).
+-- Cache the local name after a successful read.
 local cached_player_name = nil;
 
 function context.get_player_name()
@@ -231,47 +314,17 @@ function context.get_player_name()
     return '';
 end
 
---- Clear the cached player name and trust names (call on logout/character switch).
+-- Clear character-specific caches on logout or switch.
 function context.clear_player_cache()
     cached_player_name = nil;
     known_trust_names = {};
 end
 
--------------------------------------------------------------------------------
--- Player Info (for deferred per-character DB init)
--------------------------------------------------------------------------------
 
---- Get the local player's character name and server ID.
---- Returns name, server_id or '', 0 if not yet available.
---- Requires the player to be in a valid zone (not character select screen).
-function context.get_player_info()
-    local player = GetPlayerEntity();
-    if (player == nil) then return '', 0; end
 
-    local name = player.Name;
-    if (name == nil or name == '' or name == 'N/A') then return '', 0; end
-
-    local server_id = player.ServerId;
-    if (server_id == nil or server_id == 0) then return '', 0; end
-
-    -- Wait until actually in a zone (not character select screen)
-    local mem = AshitaCore:GetMemoryManager();
-    if (mem == nil) then return '', 0; end
-    local party = mem:GetParty();
-    if (party == nil) then return '', 0; end
-    local zone_id = party:GetMemberZone(0);
-    if (zone_id == nil or zone_id == 0) then return '', 0; end
-
-    return name, server_id;
-end
-
--------------------------------------------------------------------------------
 -- Target
--------------------------------------------------------------------------------
 
---- Get current target name (for "Add from Target" button).
---- Returns name only if target is a player character (entity type 0).
---- Returns '', 'not_pc' if target is an NPC/mob, or '', nil if no target.
+-- Return a PC target name; NPC/mob gives empty name and not_pc, no target gives empty name and nil.
 function context.get_target_name()
     local mem = AshitaCore:GetMemoryManager();
     if (mem == nil) then return '', nil; end

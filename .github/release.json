@@ -4,14 +4,23 @@
   "addonFolder": "playernotes",
   "versionFile": "playernotes.lua",
   "versionPattern": "(?m)^\\s*addon\\.version\\s*=\\s*'([0-9]+(?:\\.[0-9]+){1,2})'",
-  "exclude": [
-    "tests",
-    "tools",
-    "TestIcons",
-    "*.bak",
-    "*.log",
-    "*.tmp",
-    "*.db-wal",
-    "*.db-shm"
+  "files": [
+    "context.lua",
+    "db.lua",
+    "db_backfill.lua",
+    "db_schema.lua",
+    "playernotes.lua",
+    "ui.lua",
+    "ui_settings.lua",
+    "ui_state.lua",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "sounds/avoid_alert.wav",
+    "sounds/avoid_nearby.wav",
+    "sounds/disband.wav",
+    "sounds/friend_alert.wav",
+    "sounds/friend_nearby.wav",
+    "sounds/player_alert.wav"
   ]
 }

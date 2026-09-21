@@ -1,34 +1,16 @@
---[[
-    PlayerNotes v1.0.0 - Player Tracking Addon for Ashita v4
-
-    Track players you meet in FFXI with ratings, tags, and notes.
-    Get toast alerts when tracked players appear nearby or join
-    your party.
-
-    Commands:
-        /pn                      - Toggle the PlayerNotes window
-        /pn show / hide          - Show or hide the window
-        /pn <name> <note>        - Quick note on a player
-        /pn rate <name> <0-5>    - Set player rating (0 to clear)
-        /pn tag <name> <tag>     - Toggle tag on a player
-        /pn search <term>        - Search players
-        /pn export               - Export all data to JSON (shared folder)
-        /pn import [file]        - Import from export file
-        /pn import list          - List available export files
-        /pn resetui / reset      - Reset UI layout
-        /pn help                 - Show commands
-
-    Author: SQLCommit
-    Version: 1.0.0
-]]--
+-- PlayerNotes: player ratings, tags, notes and encounter alerts.
+-- Author: SQLCommit
 
 addon.name    = 'playernotes';
 addon.author  = 'SQLCommit';
-addon.version = '1.0.0';
+addon.version = '1.0.1';
 addon.desc    = 'Player tracking with ratings, tags, and notes.';
 addon.link    = 'https://github.com/SQLCommit/playernotes';
 
 require 'common';
+
+-- Clear owned modules on reload; Ashita retains package.loaded. Keep shared libraries cached.
+for _, m in ipairs({ 'ui', 'ui_state', 'ui_settings', 'db', 'context' }) do package.loaded[m] = nil; end
 
 local chat     = require 'chat';
 local settings = require 'settings';
@@ -37,9 +19,7 @@ local ui       = require 'ui';
 local db       = require 'db';
 local context  = require 'context';
 
--------------------------------------------------------------------------------
 -- Default Settings (saved per-character via Ashita settings)
--------------------------------------------------------------------------------
 local default_settings = T{
     show_on_load          = true,
     alert_known_players   = true,
@@ -95,19 +75,16 @@ local default_settings = T{
     toast_border_color       = T{ 0.43, 0.43, 0.50 },
 };
 
--------------------------------------------------------------------------------
 -- State
--------------------------------------------------------------------------------
 local last_player_check = 0;
 local last_zone_id = 0;
 local last_party_names = T{};
 local known_party_names = T{};
+local disband_pending   = false;   -- a disband the post-zone cooldown held back; see the tick
 local last_was_alliance = false;
 local last_zone_time = 0;
 
--------------------------------------------------------------------------------
 -- Valid tags (for command validation)
--------------------------------------------------------------------------------
 local valid_tags = {
     healer = 'Healer', tank = 'Tank', dps = 'DPS', mage = 'Mage', support = 'Support',
     crafter = 'Crafter', friend = 'Friend', avoid = 'Avoid', mentor = 'Mentor',
@@ -115,19 +92,41 @@ local valid_tags = {
 
 local exports_dir = '';
 local base_path = '';
-local char_detected = false;
 
--------------------------------------------------------------------------------
--- Helper: Self-name check (prevent tracking yourself)
--------------------------------------------------------------------------------
-local function is_self_name(name)
-    local self_name = context.get_player_name();
-    return self_name ~= '' and name:lower() == self_name:lower();
+-- Sort exports by their embedded timestamp; filenames begin with character names.
+-- Unparseable timestamps sort oldest.
+local function sort_exports_by_time(files)
+    local function stamp_of(fn)
+        return fn:match('(%d%d%d%d%d%d%d%d_%d%d%d%d%d%d)%.json$') or '';
+    end
+    table.sort(files, function (a, b)
+        local sa, sb = stamp_of(a), stamp_of(b);
+        if (sa ~= sb) then return sa < sb; end
+        return a < b;
+    end);
+    return files;
 end
 
--------------------------------------------------------------------------------
+-- Refuse writes without a database or known self identity, and refuse self-profiles.
+local function refuse_mutation(pname)
+    if (db.conn == nil) then
+        print(chat.header(addon.name):append(chat.error('Database unavailable -- nothing was saved.')));
+        return true;
+    end
+
+    local self_name = context.get_player_name();
+    if (self_name == '') then
+        print(chat.header(addon.name):append(chat.error('Character not identified yet -- try again in a moment.')));
+        return true;
+    end
+    if (pname:lower() == self_name:lower()) then
+        print(chat.header(addon.name):append(chat.error('Cannot track yourself.')));
+        return true;
+    end
+    return false;
+end
+
 -- Helper: Print help information
--------------------------------------------------------------------------------
 
 local function print_help()
     print(chat.header(addon.name):append(chat.message('Available commands:')));
@@ -152,9 +151,7 @@ local function print_help()
     end);
 end
 
--------------------------------------------------------------------------------
 -- Events
--------------------------------------------------------------------------------
 
 ashita.events.register('load', 'playernotes_load', function ()
     local s = settings.load(default_settings);
@@ -176,10 +173,9 @@ ashita.events.register('load', 'playernotes_load', function ()
 end);
 
 ashita.events.register('unload', 'playernotes_unload', function ()
-    ui.sync_settings();
-    settings.save();
-    db.close();
-    context.clear_player_cache();
+    pcall(function() ui.sync_settings(); settings.save(); end);
+    pcall(db.close);              -- must run even if the settings save above threw, or the SQLite/WAL handle leaks
+    pcall(context.clear_player_cache);
 end);
 
 ashita.events.register('command', 'playernotes_command', function (e)
@@ -224,7 +220,16 @@ ashita.events.register('command', 'playernotes_command', function (e)
 
     -- /pn export
     if (args[2]:any('export')) then
+        if (db.conn == nil) then
+            print(chat.header(addon.name):append(chat.error('Database unavailable -- nothing to export.')));
+            return;
+        end
+
         local data = db.export_all();
+        if (not data.ok) then
+            print(chat.header(addon.name):append(chat.error('Export failed: could not read the database.')));
+            return;
+        end
 
         -- Count notes
         local note_count = 0;
@@ -232,16 +237,19 @@ ashita.events.register('command', 'playernotes_command', function (e)
             note_count = note_count + #p.notes;
         end
 
-        -- Add meta block
-        data.meta = {
-            addon        = 'playernotes',
-            version      = addon.version,
-            exported_at  = os.date('%Y-%m-%d %H:%M:%S'),
-            player_count = #data.players,
-            note_count   = note_count,
+        -- Build the payload explicitly so the internal ok flag never reaches the file
+        local payload = {
+            players = data.players,
+            meta = {
+                addon        = 'playernotes',
+                version      = addon.version,
+                exported_at  = os.date('%Y-%m-%d %H:%M:%S'),
+                player_count = #data.players,
+                note_count   = note_count,
+            },
         };
 
-        local ok, encoded = pcall(json.encode, data);
+        local ok, encoded = pcall(json.encode, payload);
         if (not ok) then
             print(chat.header(addon.name):append(chat.error('Export failed: could not encode JSON.')));
             return;
@@ -256,8 +264,15 @@ ashita.events.register('command', 'playernotes_command', function (e)
             print(chat.header(addon.name):append(chat.error('Export failed: ' .. (err or 'unknown error'))));
             return;
         end
-        f:write(encoded);
-        f:close();
+        -- Check BOTH: io.open can succeed on a full disk or a read-only share and only fail at the
+        -- write or the flush-on-close, which used to be reported as a successful export.
+        local wok, werr = f:write(encoded);
+        local cok, cerr = f:close();
+        if (not wok or not cok) then
+            print(chat.header(addon.name):append(chat.error(
+                'Export failed: ' .. tostring(werr or cerr or 'write error'))));
+            return;
+        end
 
         print(chat.header(addon.name):append(chat.success('Exported: '))
             :append(chat.message(filename))
@@ -272,7 +287,7 @@ ashita.events.register('command', 'playernotes_command', function (e)
             print(chat.header(addon.name):append(chat.error('No export files found in exports/ directory.')));
             return;
         end
-        table.sort(files);
+        sort_exports_by_time(files);
         print(chat.header(addon.name):append(chat.message(#files .. ' export file(s) in exports/:')));
         for i, fname in ipairs(files) do
             local prefix = (i == #files) and ' >> ' or '    ';
@@ -304,7 +319,7 @@ ashita.events.register('command', 'playernotes_command', function (e)
                 print(chat.header(addon.name):append(chat.error('No export files found in exports/ directory.')));
                 return;
             end
-            table.sort(files);
+            sort_exports_by_time(files);
             chosen_name = files[#files];
             filepath = exports_dir .. '\\' .. chosen_name;
             if (#files > 1) then
@@ -332,10 +347,21 @@ ashita.events.register('command', 'playernotes_command', function (e)
             return;
         end
 
-        local result = db.import_data(data.players);
+        -- Pass self_name so imports cannot create a self-profile.
+        local result = db.import_data(data.players, context.get_player_name());
+        if (not result.ok) then
+            -- The transaction rolled back: nothing was written, so do not report counters as imported.
+            print(chat.header(addon.name):append(chat.error('Import failed, nothing was saved: '))
+                :append(chat.message(result.error or 'unknown error')));
+            return;
+        end
+        local summary = result.players_added .. ' added, ' .. result.players_updated .. ' updated, '
+            .. result.notes_added .. ' notes added, ' .. result.notes_skipped .. ' skipped';
+        if ((result.self_skipped or 0) > 0) then
+            summary = summary .. ', ' .. result.self_skipped .. ' about you skipped';
+        end
         print(chat.header(addon.name):append(chat.success('Imported ' .. chosen_name .. ': '))
-            :append(chat.message(result.players_added .. ' added, ' .. result.players_updated .. ' updated, '
-                .. result.notes_added .. ' notes added, ' .. result.notes_skipped .. ' skipped')));
+            :append(chat.message(summary)));
         return;
     end
 
@@ -349,40 +375,51 @@ ashita.events.register('command', 'playernotes_command', function (e)
     end
 
     -- /pn rate <name> <1-5>
-    if (args[2]:any('rate') and #args >= 4) then
-        local pname = args[3];
-        if (is_self_name(pname)) then
-            print(chat.header(addon.name):append(chat.error('Cannot track yourself.')));
+    if (args[2]:any('rate')) then
+        -- Arity is checked INSIDE the branch and always returns. Falling through on a short
+        -- invocation reached the quick-note catch-all below, which took 'rate' as the player NAME.
+        if (#args < 4) then
+            print(chat.header(addon.name):append(chat.error('Usage: /pn rate <name> <0-5>')));
             return;
         end
+        local pname = args[3];
+        if (refuse_mutation(pname)) then return; end
         local rating = tonumber(args[4]);
-        if (rating ~= nil and rating >= 0 and rating <= 5) then
-            local player = db.get_player_by_name(pname);
+        -- Whole numbers only: the table renders stars via star_strings[rating], so a fractional
+        -- rating stored fine but displayed as '-', which reads exactly like "it did not save".
+        if (rating ~= nil and rating == math.floor(rating) and rating >= 0 and rating <= 5) then
+            local player = db.get_player_by_name(pname, context.find_server_id(pname));
             if (player ~= nil) then
-                db.update_player(player.id, rating, player.tags);
-                print(chat.header(addon.name):append(chat.success('Rating set: '))
-                    :append(chat.message(pname .. ' = ' .. rating .. ' stars')));
+                if (db.update_player(player.id, rating, player.tags)) then
+                    print(chat.header(addon.name):append(chat.success('Rating set: '))
+                        :append(chat.message(pname .. ' = ' .. rating .. ' stars')));
+                else
+                    print(chat.header(addon.name):append(chat.error('Not saved: the database rejected the write.')));
+                end
             else
                 -- Create player with rating
-                local id = db.add_player(pname, rating, '');
+                local id = db.add_player(pname, rating, '', context.find_server_id(pname));
                 if (id ~= nil) then
                     print(chat.header(addon.name):append(chat.success('Player added with rating: '))
                         :append(chat.message(pname .. ' = ' .. rating .. ' stars')));
+                else
+                    print(chat.header(addon.name):append(chat.error('Not saved: could not create player.')));
                 end
             end
         else
-            print(chat.header(addon.name):append(chat.error('Rating must be 0-5.')));
+            print(chat.header(addon.name):append(chat.error('Rating must be a whole number 0-5.')));
         end
         return;
     end
 
     -- /pn tag <name> <tag>
-    if (args[2]:any('tag') and #args >= 4) then
-        local pname = args[3];
-        if (is_self_name(pname)) then
-            print(chat.header(addon.name):append(chat.error('Cannot track yourself.')));
+    if (args[2]:any('tag')) then
+        if (#args < 4) then
+            print(chat.header(addon.name):append(chat.error('Usage: /pn tag <name> <tag>')));
             return;
         end
+        local pname = args[3];
+        if (refuse_mutation(pname)) then return; end
         local tag_input = args[4]:lower();
         local tag_name = valid_tags[tag_input];
         if (tag_name == nil) then
@@ -390,15 +427,20 @@ ashita.events.register('command', 'playernotes_command', function (e)
             return;
         end
 
-        local player = db.get_player_by_name(pname);
+        local player = db.get_player_by_name(pname, context.find_server_id(pname));
         if (player == nil) then
             -- Create player with tag
-            db.add_player(pname, 0, tag_name);
+            local id = db.add_player(pname, 0, tag_name, context.find_server_id(pname));
+            if (id == nil) then
+                print(chat.header(addon.name):append(chat.error('Not saved: could not create player.')));
+                return;
+            end
             print(chat.header(addon.name):append(chat.success('Player added with tag: '))
                 :append(chat.message(pname .. ' [' .. tag_name .. ']')));
         else
             -- Toggle tag
             local tags = player.tags or '';
+            local msg;
             if (tags:find(tag_name)) then
                 -- Parse to table, remove, reconstruct (avoids regex merging adjacent tags)
                 local tag_list = {};
@@ -409,15 +451,22 @@ ashita.events.register('command', 'playernotes_command', function (e)
                     end
                 end
                 tags = table.concat(tag_list, ',');
-                print(chat.header(addon.name):append(chat.message('Tag removed: '))
-                    :append(chat.message(pname .. ' [-' .. tag_name .. ']')));
+                msg = chat.header(addon.name):append(chat.message('Tag removed: '))
+                    :append(chat.message(pname .. ' [-' .. tag_name .. ']'));
             else
                 if (tags ~= '') then tags = tags .. ','; end
                 tags = tags .. tag_name;
-                print(chat.header(addon.name):append(chat.success('Tag added: '))
-                    :append(chat.message(pname .. ' [+' .. tag_name .. ']')));
+                msg = chat.header(addon.name):append(chat.success('Tag added: '))
+                    :append(chat.message(pname .. ' [+' .. tag_name .. ']'));
             end
-            db.update_player(player.id, player.rating, tags);
+
+            -- Write FIRST, then report the outcome. Printing before the update announced a tag change
+            -- the database could still reject.
+            if (db.update_player(player.id, player.rating, tags)) then
+                print(msg);
+            else
+                print(chat.header(addon.name):append(chat.error('Not saved: the database rejected the write.')));
+            end
         end
         return;
     end
@@ -425,26 +474,28 @@ ashita.events.register('command', 'playernotes_command', function (e)
     -- /pn <name> <note> - Quick note (default: anything with 3+ args)
     if (#args >= 3) then
         local pname = args[2];
-        if (is_self_name(pname)) then
-            print(chat.header(addon.name):append(chat.error('Cannot track yourself.')));
-            return;
-        end
+        if (refuse_mutation(pname)) then return; end
         local note_text = args:concat(' ', 3);
 
         -- Create or get player
-        local player = db.get_player_by_name(pname);
+        local player = db.get_player_by_name(pname, context.find_server_id(pname));
         local player_id;
         if (player ~= nil) then
             player_id = player.id;
         else
-            player_id = db.add_player(pname, 0, '');
+            player_id = db.add_player(pname, 0, '', context.find_server_id(pname));
         end
 
         if (player_id ~= nil) then
             local zone_name = context.get_zone_name();
-            db.add_note(player_id, note_text, zone_name);
-            print(chat.header(addon.name):append(chat.success('Note added: '))
-                :append(chat.message(pname .. ' - ' .. note_text)));
+            if (db.add_note(player_id, note_text, zone_name) ~= nil) then
+                print(chat.header(addon.name):append(chat.success('Note added: '))
+                    :append(chat.message(pname .. ' - ' .. note_text)));
+            else
+                print(chat.header(addon.name):append(chat.error('Not saved: the database rejected the note.')));
+            end
+        else
+            print(chat.header(addon.name):append(chat.error('Not saved: could not create player.')));
         end
         return;
     end
@@ -454,21 +505,43 @@ ashita.events.register('command', 'playernotes_command', function (e)
 end);
 
 ashita.events.register('d3d_present', 'playernotes_present', function ()
-    -- Deferred DB init: detect character name once logged in
-    if (not char_detected) then
-        local name, server_id = context.get_player_info();
-        if (name ~= '' and server_id > 0) then
-            char_detected = true;
-            local char_folder = name .. '_' .. tostring(server_id);
+    -- Use settings.name/server_id for DB identity; entity reads can transiently return invalid IDs.
+    -- Recheck each frame to rebind on character switches.
+    if (settings.logged_in and settings.name ~= nil and settings.name ~= '' and settings.server_id > 0) then
+        local char_folder = settings.name .. '_' .. tostring(settings.server_id);
+        if (char_folder ~= db.char_name) then
+            pcall(db.close);                    -- also resets every cache, counter and identity field
+            pcall(context.clear_player_cache);  -- self-name cache belonged to the previous character
+            ui.reset_for_character();           -- Selection and confirmation IDs belong to the previous database.
+            known_party_names = T{};            -- party/disband state belonged to the previous character
+            last_party_names  = T{};
+            last_was_alliance = false;
+            disband_pending   = false;
             db.init(base_path, char_folder);
         end
+    elseif (db.char_name ~= nil) then
+        -- Close and clear character state on logout before party detection can open a disband popup.
+        pcall(db.close);
+        pcall(context.clear_player_cache);
+        ui.reset_for_character();
+        known_party_names = T{};
+        last_party_names  = T{};
+        last_was_alliance = false;
+        disband_pending   = false;
+        last_zone_id      = 0;
     end
 
-    -- Save settings if UI flagged a change
+    -- Save settings before the database guard so changes persist even while no notebook is open.
+    -- Detection requires both a character binding and a live connection.
     if (ui.settings_dirty) then
         ui.settings_dirty = false;
         ui.sync_settings();
         settings.save();
+    end
+
+    if (db.char_name == nil or db.conn == nil) then
+        ui.render();
+        return;
     end
 
     if (ui.settings == nil) then
@@ -505,21 +578,61 @@ ashita.events.register('d3d_present', 'playernotes_present', function ()
         local current_names = T{};
         for _, p in ipairs(party) do
             current_names:append(p.name);
-            if (not known_party_names:contains(p.name)) then
-                known_party_names:append(p.name);
+            local known = nil;
+            for _, m in ipairs(known_party_names) do
+                if (m.name == p.name) then known = m; break; end
+            end
+            if (known == nil) then
+                known_party_names:append({ name = p.name, server_id = p.server_id or 0 });
+            elseif ((known.server_id or 0) == 0 and (p.server_id or 0) ~= 0) then
+                -- Seen first without an id (out of range, mid-zone); bind it once one is available.
+                known.server_id = p.server_id;
             end
         end
         local current_is_alliance = context.is_alliance();
 
         if (#last_party_names > 0 and #current_names == 0) then
-            if (ui.settings.prompt_on_disband and not last_was_alliance and (now - last_zone_time) > 15) then
-                ui.show_disband_popup(known_party_names);
+            local want_popup = ui.settings.prompt_on_disband and not last_was_alliance;
+            if (want_popup and (now - last_zone_time) > 15) then
+                disband_pending = false;
+                -- Refilter newly identified trusts before showing accumulated disband cards.
+                local roster = T{};
+                for _, m in ipairs(known_party_names) do
+                    if (not context.is_known_trust(m.name)) then roster:append(m); end
+                end
+                ui.show_disband_popup(roster);
+                known_party_names = T{};
+                last_party_names = current_names;
+                last_was_alliance = current_is_alliance;
+            elseif (want_popup) then
+                -- Prompt wanted but still inside the post-zone cooldown: preserve state so the next
+                -- check retries the popup once the cooldown elapses.
+                disband_pending = true;
+            else
+                -- Clear the roster even when this disband produces no popup.
                 known_party_names = T{};
                 last_party_names = current_names;
                 last_was_alliance = current_is_alliance;
             end
-            -- During cooldown: preserve state so detection retries on next check
         else
+            -- After a suppressed disband, retain the roster only if a current member overlaps it.
+            -- A new party must not inherit the previous party's cards.
+            if (disband_pending and #current_names > 0) then
+                local same_party = false;
+                for _, nm in ipairs(current_names) do
+                    for _, m in ipairs(known_party_names) do
+                        if (m.name == nm) then same_party = true; break; end
+                    end
+                    if (same_party) then break; end
+                end
+                if (not same_party) then
+                    known_party_names = T{};
+                    for _, p in ipairs(party) do
+                        known_party_names:append({ name = p.name, server_id = p.server_id or 0 });
+                    end
+                end
+            end
+            disband_pending = false;
             last_party_names = current_names;
             last_was_alliance = current_is_alliance;
         end
@@ -528,9 +641,7 @@ ashita.events.register('d3d_present', 'playernotes_present', function ()
     ui.render();
 end);
 
--------------------------------------------------------------------------------
 -- Event: Settings changed externally
--------------------------------------------------------------------------------
 settings.register('settings', 'playernotes_settings_update', function(s)
     if (s ~= nil) then
         ui.apply_settings(s);
