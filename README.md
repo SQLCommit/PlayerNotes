@@ -93,7 +93,7 @@ See the [changelog](CHANGELOG.md) for new features, improvements, and fixes in e
 
 ## ![Thanks and credits](https://readme-typing-svg.demolab.com/?font=Cinzel&size=25&duration=1&pause=0&color=638EBD&center=false&vCenter=true&repeat=false&width=600&height=42&lines=Thanks+and+credits&letterSpacing=0.5px&weight=700)
 
-- **atom0s, Thorny, and the [Ashita community](https://discord.gg/Ashita)** — For [Ashita](https://www.ashitaxi.com/) and its addon framework.
+- **The Ashita team** — atom0s, Thorny, and the [Ashita community](https://discord.gg/Ashita).
 
 ## ![License](https://readme-typing-svg.demolab.com/?font=Cinzel&size=25&duration=1&pause=0&color=638EBD&center=false&vCenter=true&repeat=false&width=600&height=42&lines=License&letterSpacing=0.5px&weight=700)
 
