@@ -2,6 +2,10 @@
 
 [Back to PlayerNotes](README.md)
 
+## v1.0.2
+
+- Fixed: the window opened at startup even with "Open window when addon loads" off.
+
 ## v1.0.1
 
 ### Improved

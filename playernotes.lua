@@ -3,7 +3,7 @@
 
 addon.name    = 'playernotes';
 addon.author  = 'SQLCommit';
-addon.version = '1.0.1';
+addon.version = '1.0.2';
 addon.desc    = 'Player tracking with ratings, tags, and notes.';
 addon.link    = 'https://github.com/SQLCommit/playernotes';
 
@@ -14,6 +14,7 @@ for _, m in ipairs({ 'ui', 'ui_state', 'ui_settings', 'db', 'context' }) do pack
 
 local chat     = require 'chat';
 local settings = require 'settings';
+local startup_pending = false;  -- waits for character settings
 local json     = require 'json';
 local ui       = require 'ui';
 local db       = require 'db';
@@ -167,7 +168,13 @@ ashita.events.register('load', 'playernotes_load', function ()
     -- DB init is deferred until character name is detected (check_character in d3d_present)
     -- UI can safely render before DB is ready (all db functions handle conn == nil)
     ui.init(db, context, s, default_settings);
-    ui.is_open[1] = s.show_on_load;
+    -- Defaults until login.
+    if (settings.logged_in) then
+        ui.is_open[1] = s.show_on_load;
+    else
+        ui.is_open[1] = false;
+        startup_pending = true;
+    end
 
     print(chat.header(addon.name):append(chat.message('v' .. addon.version .. ' loaded. Use ')):append(chat.success('/pn')):append(chat.message(' to toggle window.')));
 end);
@@ -645,5 +652,9 @@ end);
 settings.register('settings', 'playernotes_settings_update', function(s)
     if (s ~= nil) then
         ui.apply_settings(s);
+        if (startup_pending and settings.logged_in) then
+            startup_pending = false;
+            ui.is_open[1] = s.show_on_load;
+        end
     end
 end);
